@@ -5,8 +5,8 @@
 모니터링 대상 서버에 설치되는 경량 Node.js 데몬.
 Docker 컨테이너와 시스템 메트릭을 수집하여 Django Backend에 WebSocket으로 전송한다.
 
-**관련 프로젝트**: `C:\Users\agics\Desktop\workspace\01. git\DCMTool_TS` (Django Backend + Frontend)
-**Backend repo**: `qkr7287/DCMTool_TS`
+**관련 프로젝트**: `C:\Users\agics\Desktop\workspace\01. git\HyperCube` (Django Backend + Frontend)
+**Backend repo**: `qkr7287/HyperCube`
 **Agent repo**: `qkr7287/hypercube-agent` (이 repo)
 
 ## 기술 스택
