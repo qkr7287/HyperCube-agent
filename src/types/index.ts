@@ -84,13 +84,51 @@ export interface ContainerMetrics {
 
 // --- WebSocket Messages ---
 
-export type WsMessageType = "system_metrics" | "containers" | "container_metrics";
+export type WsMessageType =
+  | "system_metrics"
+  | "containers"
+  | "container_metrics"
+  | "command_response";
 
 export interface WsMessage {
   type: WsMessageType;
   data: Record<string, unknown>;
   timestamp: string;
 }
+
+// --- Commands (Backend → Agent) ---
+
+export type CommandName = "get_logs" | "inspect" | "control" | "system_info";
+
+export interface CommandRequest {
+  type: "command";
+  requestId: string;
+  command: CommandName;
+  params: Record<string, unknown>;
+}
+
+export interface CommandResponse {
+  type: "command_response";
+  requestId: string;
+  success: boolean;
+  data?: Record<string, unknown>;
+  error?: string;
+}
+
+export type ContainerAction =
+  | "start"
+  | "stop"
+  | "restart"
+  | "pause"
+  | "unpause"
+  | "kill"
+  | "remove";
+
+export type SystemInfoSubCommand =
+  | "cpu_detail"
+  | "processes"
+  | "network_detail"
+  | "users";
 
 // --- Agent Registration ---
 

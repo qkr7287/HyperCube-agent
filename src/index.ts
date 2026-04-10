@@ -1,20 +1,28 @@
 import { loadConfig } from "./config.js";
+import { createLogger } from "./logger.js";
 import { collectSystemMetrics } from "./collectors/system.js";
-import { initDocker, collectContainers, collectAllContainerMetrics } from "./collectors/docker.js";
+import { DockerCollector } from "./collectors/docker.js";
 import { DeltaEngine } from "./sync/delta.js";
+import { dispatchCommand } from "./handlers/index.js";
 import { registerAgent, pollApproval } from "./transport/register.js";
 import { AgentWebSocket } from "./transport/websocket.js";
-import type { WsMessage } from "./types/index.js";
 
+const log = createLogger("agent");
+const collectLog = createLogger("collector");
 const abortController = new AbortController();
 let collectTimer: ReturnType<typeof setInterval> | null = null;
+let collecting = false;
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  console.log(`[agent] Starting HyperCube Agent (${config.agentHostname})`);
+  log.info(`Starting HyperCube Agent (${config.agentHostname})`);
 
   // initialize docker client
-  initDocker(config.dockerSocket);
+  const dockerCollector = new DockerCollector(config.dockerSocket);
+  const dockerAvailable = await dockerCollector.probe();
+  if (!dockerAvailable) {
+    log.warn("Docker not available. System metrics only. Will retry Docker every 30s.");
+  }
 
   // register with backend
   const registration = await registerAgent(config);
@@ -30,29 +38,48 @@ async function main(): Promise<void> {
   const deltaEngine = new DeltaEngine();
 
   ws.onReconnect = () => {
-    console.log("[agent] Reconnected. Sending full snapshot on next cycle.");
+    log.info("Reconnected. Sending full snapshot on next cycle.");
     deltaEngine.reset();
+  };
+
+  ws.onCommand = (request) => {
+    return dispatchCommand(dockerCollector.getDocker(), request);
   };
 
   // initial connection with retry
   await connectWithRetry(ws);
 
-  // start collection loop
-  console.log(`[agent] Collecting every ${config.collectInterval}ms`);
-  collectTimer = setInterval(() => {
-    collectAndSend(config, ws, deltaEngine).catch((err) => {
-      console.error(`[agent] Collection error: ${(err as Error).message}`);
-    });
-  }, config.collectInterval);
+  // send first snapshot (no timeout — first systeminformation call can be slow)
+  log.info("Sending initial snapshot...");
+  await collectAndSend(config, ws, deltaEngine, dockerCollector);
 
-  // send first snapshot immediately
-  await collectAndSend(config, ws, deltaEngine);
+  // start collection loop after first snapshot
+  const collectTimeout = config.collectInterval * 3;
+  log.info(`Collecting every ${config.collectInterval}ms (timeout: ${collectTimeout}ms)`);
+  collectTimer = setInterval(() => {
+    if (collecting) {
+      log.debug("Previous collection still running. Skipping cycle.");
+      return;
+    }
+    collecting = true;
+    withTimeout(
+      collectAndSend(config, ws, deltaEngine, dockerCollector),
+      collectTimeout,
+    )
+      .catch((err) => {
+        log.error(`Collection error: ${(err as Error).message}`);
+      })
+      .finally(() => {
+        collecting = false;
+      });
+  }, config.collectInterval);
 }
 
 async function collectAndSend(
   config: ReturnType<typeof loadConfig>,
   ws: AgentWebSocket,
   deltaEngine: DeltaEngine,
+  dockerCollector: DockerCollector,
 ): Promise<void> {
   if (!ws.isConnected) return;
 
@@ -70,12 +97,12 @@ async function collectAndSend(
       });
     }
   } catch (err) {
-    console.error(`[collector] System metrics failed: ${(err as Error).message}`);
+    collectLog.error(`System metrics failed: ${(err as Error).message}`);
   }
 
-  // collect containers
-  try {
-    const containers = await collectContainers();
+  // collect containers (skipped automatically when Docker unavailable)
+  const containers = await dockerCollector.collectContainers();
+  if (containers.length > 0) {
     const containersDelta = deltaEngine.computeContainersDelta(containers);
     if (containersDelta) {
       ws.send({
@@ -86,7 +113,7 @@ async function collectAndSend(
     }
 
     // collect container metrics (only for running containers)
-    const metrics = await collectAllContainerMetrics(containers);
+    const metrics = await dockerCollector.collectAllContainerMetrics(containers);
     const metricsDelta = deltaEngine.computeContainerMetricsDelta(metrics);
     if (metricsDelta) {
       for (const [, m] of Object.entries(metricsDelta)) {
@@ -97,8 +124,6 @@ async function collectAndSend(
         });
       }
     }
-  } catch (err) {
-    console.error(`[collector] Docker metrics failed: ${(err as Error).message}`);
   }
 }
 
@@ -108,7 +133,7 @@ async function connectWithRetry(ws: AgentWebSocket): Promise<void> {
       await ws.connect();
       return;
     } catch {
-      console.warn("[agent] Initial connection failed. Retrying via backoff...");
+      log.warn("Initial connection failed. Retrying via backoff...");
       await sleep(3000);
     }
   }
@@ -118,10 +143,19 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Collection timed out after ${ms}ms`)), ms),
+    ),
+  ]);
+}
+
 // --- Graceful Shutdown ---
 
 function shutdown(signal: string): void {
-  console.log(`[agent] Received ${signal}. Shutting down...`);
+  log.info(`Received ${signal}. Shutting down...`);
   abortController.abort();
   if (collectTimer) clearInterval(collectTimer);
   process.exit(0);
@@ -130,12 +164,12 @@ function shutdown(signal: string): void {
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("unhandledRejection", (err) => {
-  console.error("[agent] Unhandled rejection:", err);
+  log.error(`Unhandled rejection: ${err}`);
 });
 
 // --- Start ---
 
 main().catch((err) => {
-  console.error(`[agent] Fatal error: ${(err as Error).message}`);
+  log.error(`Fatal error: ${(err as Error).message}`);
   process.exit(1);
 });

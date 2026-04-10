@@ -1,5 +1,8 @@
 import WebSocket from "ws";
-import type { AppConfig, WsMessage } from "../types/index.js";
+import { createLogger } from "../logger.js";
+import type { AppConfig, CommandRequest, CommandResponse, WsMessage } from "../types/index.js";
+
+const log = createLogger("ws");
 
 const INITIAL_BACKOFF = 1_000;
 const MAX_BACKOFF = 30_000;
@@ -16,6 +19,7 @@ export class AgentWebSocket {
   private closed = false;
 
   onReconnect: (() => void) | null = null;
+  onCommand: ((request: CommandRequest) => Promise<CommandResponse>) | null = null;
 
   constructor(
     private readonly config: AppConfig,
@@ -35,13 +39,13 @@ export class AgentWebSocket {
       }
 
       const wsUrl = buildWsUrl(this.config.backendUrl, this.agentId, this.token);
-      console.log(`[ws] Connecting to ${wsUrl.replace(/token=.+/, "token=***")}...`);
+      log.info(`Connecting to ${wsUrl.replace(/token=.+/, "token=***")}...`);
 
       this.ws = new WebSocket(wsUrl);
       let resolved = false;
 
       this.ws.on("open", () => {
-        console.log("[ws] Connected.");
+        log.info("Connected.");
         this.backoff = INITIAL_BACKOFF;
         this.startHeartbeat();
         resolved = true;
@@ -52,7 +56,13 @@ export class AgentWebSocket {
         try {
           const msg = JSON.parse(data.toString());
           if (msg.type === "connection") {
-            console.log(`[ws] Server: ${msg.message}`);
+            log.info(`Server: ${msg.message}`);
+          } else if (msg.type === "command" && this.onCommand) {
+            this.onCommand(msg as CommandRequest)
+              .then((response) => this.sendResponse(response))
+              .catch((err) => {
+                log.error(`Command handler error: ${(err as Error).message}`);
+              });
           }
         } catch {
           // ignore non-JSON messages
@@ -64,7 +74,7 @@ export class AgentWebSocket {
       });
 
       this.ws.on("close", (code, reason) => {
-        console.warn(`[ws] Disconnected: ${code} ${reason.toString()}`);
+        log.warn(`Disconnected: ${code} ${reason.toString()}`);
         this.stopHeartbeat();
         if (!resolved) {
           resolved = true;
@@ -76,7 +86,7 @@ export class AgentWebSocket {
       });
 
       this.ws.on("error", (err) => {
-        console.error(`[ws] Error: ${err.message}`);
+        log.error(`Error: ${err.message}`);
         if (!resolved) {
           resolved = true;
           reject(err);
@@ -91,7 +101,17 @@ export class AgentWebSocket {
     try {
       this.ws.send(JSON.stringify(message));
     } catch (err) {
-      console.error(`[ws] Send failed: ${(err as Error).message}`);
+      log.error(`Send failed: ${(err as Error).message}`);
+    }
+  }
+
+  sendResponse(response: CommandResponse): void {
+    if (!this.isConnected || !this.ws) return;
+
+    try {
+      this.ws.send(JSON.stringify(response));
+    } catch (err) {
+      log.error(`Response send failed: ${(err as Error).message}`);
     }
   }
 
@@ -107,7 +127,7 @@ export class AgentWebSocket {
   private scheduleReconnect(): void {
     const jitter = Math.random() * JITTER_RANGE * 2 - JITTER_RANGE;
     const delay = Math.min(this.backoff + jitter, MAX_BACKOFF);
-    console.log(`[ws] Reconnecting in ${Math.round(delay / 1000)}s...`);
+    log.info(`Reconnecting in ${Math.round(delay / 1000)}s...`);
 
     setTimeout(async () => {
       try {
@@ -126,7 +146,7 @@ export class AgentWebSocket {
       if (!this.isConnected || !this.ws) return;
       this.ws.ping();
       this.pongTimer = setTimeout(() => {
-        console.warn("[ws] Pong timeout. Closing connection.");
+        log.warn("Pong timeout. Closing connection.");
         this.ws?.terminate();
       }, PONG_TIMEOUT);
     }, PING_INTERVAL);
