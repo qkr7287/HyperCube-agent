@@ -54,18 +54,14 @@ async function main(): Promise<void> {
   await collectAndSend(config, ws, deltaEngine, dockerCollector);
 
   // start collection loop after first snapshot
-  const collectTimeout = config.collectInterval * 3;
-  log.info(`Collecting every ${config.collectInterval}ms (timeout: ${collectTimeout}ms)`);
+  log.info(`Collecting every ${config.collectInterval}ms`);
   collectTimer = setInterval(() => {
     if (collecting) {
       log.debug("Previous collection still running. Skipping cycle.");
       return;
     }
     collecting = true;
-    withTimeout(
-      collectAndSend(config, ws, deltaEngine, dockerCollector),
-      collectTimeout,
-    )
+    collectAndSend(config, ws, deltaEngine, dockerCollector)
       .catch((err) => {
         log.error(`Collection error: ${(err as Error).message}`);
       })
@@ -141,15 +137,6 @@ async function connectWithRetry(ws: AgentWebSocket): Promise<void> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`Collection timed out after ${ms}ms`)), ms),
-    ),
-  ]);
 }
 
 // --- Graceful Shutdown ---
