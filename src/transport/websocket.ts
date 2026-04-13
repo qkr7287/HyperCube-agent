@@ -10,12 +10,16 @@ const BACKOFF_MULTIPLIER = 2;
 const JITTER_RANGE = 500;
 const PING_INTERVAL = 30_000;
 const PONG_TIMEOUT = 10_000;
+const SEND_STATS_INTERVAL = 60_000;
 
 export class AgentWebSocket {
   private ws: WebSocket | null = null;
   private backoff = INITIAL_BACKOFF;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
+  private statsTimer: ReturnType<typeof setInterval> | null = null;
+  private sentCount = 0;
+  private sentBytes = 0;
   private closed = false;
 
   onReconnect: (() => void) | null = null;
@@ -48,6 +52,7 @@ export class AgentWebSocket {
         log.info("Connected.");
         this.backoff = INITIAL_BACKOFF;
         this.startHeartbeat();
+        this.startSendStats();
         resolved = true;
         resolve();
       });
@@ -76,6 +81,7 @@ export class AgentWebSocket {
       this.ws.on("close", (code, reason) => {
         log.warn(`Disconnected: ${code} ${reason.toString()}`);
         this.stopHeartbeat();
+        this.stopSendStats();
         if (!resolved) {
           resolved = true;
           reject(new Error(`WebSocket closed: ${code}`));
@@ -99,7 +105,10 @@ export class AgentWebSocket {
     if (!this.isConnected || !this.ws) return;
 
     try {
-      this.ws.send(JSON.stringify(message));
+      const payload = JSON.stringify(message);
+      this.ws.send(payload);
+      this.sentCount += 1;
+      this.sentBytes += Buffer.byteLength(payload);
     } catch (err) {
       log.error(`Send failed: ${(err as Error).message}`);
     }
@@ -118,6 +127,7 @@ export class AgentWebSocket {
   close(): void {
     this.closed = true;
     this.stopHeartbeat();
+    this.stopSendStats();
     if (this.ws) {
       this.ws.close(1000, "Agent shutting down");
       this.ws = null;
@@ -158,6 +168,25 @@ export class AgentWebSocket {
       this.pingTimer = null;
     }
     this.clearPongTimeout();
+  }
+
+  private startSendStats(): void {
+    this.sentCount = 0;
+    this.sentBytes = 0;
+    this.statsTimer = setInterval(() => {
+      if (this.sentCount === 0) return;
+      const kb = (this.sentBytes / 1024).toFixed(1);
+      log.info(`Sent ${this.sentCount} messages (${kb} KB) in last ${SEND_STATS_INTERVAL / 1000}s`);
+      this.sentCount = 0;
+      this.sentBytes = 0;
+    }, SEND_STATS_INTERVAL);
+  }
+
+  private stopSendStats(): void {
+    if (this.statsTimer) {
+      clearInterval(this.statsTimer);
+      this.statsTimer = null;
+    }
   }
 
   private clearPongTimeout(): void {
