@@ -1,4 +1,5 @@
 import os from "node:os";
+import { readFileSync } from "node:fs";
 import type { AppConfig } from "./types/index.js";
 
 export function loadConfig(): AppConfig {
@@ -13,10 +14,18 @@ export function loadConfig(): AppConfig {
   return {
     backendUrl,
     backendApiUrl,
-    agentHostname: process.env.AGENT_HOSTNAME || os.hostname(),
+    agentHostname: process.env.AGENT_HOSTNAME || readHostHostname() || os.hostname(),
     collectInterval,
     dockerSocket: process.env.DOCKER_SOCKET ?? "/var/run/docker.sock",
   };
+}
+
+function readHostHostname(): string | null {
+  try {
+    return readFileSync("/host/etc/hostname", "utf-8").trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 function requireEnv(name: string): string {

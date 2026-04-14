@@ -1,4 +1,6 @@
 import si from "systeminformation";
+import { promises as fs } from "node:fs";
+import os from "node:os";
 import { createLogger } from "../logger.js";
 import type { SystemInfoSubCommand } from "../types/index.js";
 
@@ -36,10 +38,11 @@ export async function handleSystemInfo(
 }
 
 async function getCpuDetail(): Promise<Record<string, unknown>> {
-  const [load, temp, cpu] = await Promise.all([
+  const [load, temp, cpu, loadAvg] = await Promise.all([
     si.currentLoad(),
     si.cpuTemperature().catch(() => null),
     si.cpu(),
+    getLoadAvg(),
   ]);
 
   return {
@@ -54,7 +57,23 @@ async function getCpuDetail(): Promise<Record<string, unknown>> {
     temperature: temp
       ? { main: temp.main, cores: temp.cores, max: temp.max }
       : null,
+    loadAvg,
   };
+}
+
+async function getLoadAvg(): Promise<{ avg1: number; avg5: number; avg15: number }> {
+  try {
+    const content = await fs.readFile("/host/proc/loadavg", "utf-8");
+    const parts = content.trim().split(/\s+/);
+    return {
+      avg1: parseFloat(parts[0]),
+      avg5: parseFloat(parts[1]),
+      avg15: parseFloat(parts[2]),
+    };
+  } catch {
+    const [avg1, avg5, avg15] = os.loadavg();
+    return { avg1, avg5, avg15 };
+  }
 }
 
 async function getProcesses(
@@ -84,13 +103,13 @@ async function getProcesses(
 }
 
 async function getNetworkDetail(): Promise<Record<string, unknown>> {
-  const [ifaces, stats] = await Promise.all([
+  const [ifaces, stats, connections] = await Promise.all([
     si.networkInterfaces(),
-    si.networkStats(),
+    getAggregatedNetStats(),
+    si.networkConnections().catch(() => []),
   ]);
 
   const ifaceList = Array.isArray(ifaces) ? ifaces : [ifaces];
-  const statList = Array.isArray(stats) ? stats : [stats];
 
   return {
     interfaces: ifaceList.map((i) => ({
@@ -102,14 +121,48 @@ async function getNetworkDetail(): Promise<Record<string, unknown>> {
       speed: i.speed,
       operstate: i.operstate,
     })),
-    stats: statList.map((s) => ({
-      iface: s.iface,
-      rxBytes: s.rx_bytes,
-      txBytes: s.tx_bytes,
-      rxSec: round(s.rx_sec ?? 0),
-      txSec: round(s.tx_sec ?? 0),
-    })),
+    stats,
+    connections: connections.length,
   };
+}
+
+async function getAggregatedNetStats(): Promise<{
+  rx_bytes: number;
+  tx_bytes: number;
+  rx_packets: number;
+  tx_packets: number;
+  rx_errors: number;
+  tx_errors: number;
+}> {
+  const empty = {
+    rx_bytes: 0, tx_bytes: 0,
+    rx_packets: 0, tx_packets: 0,
+    rx_errors: 0, tx_errors: 0,
+  };
+  try {
+    const content = await fs.readFile("/host/proc/net/dev", "utf-8");
+    const lines = content.split("\n").slice(2);
+    const agg = { ...empty };
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const colonIdx = trimmed.indexOf(":");
+      if (colonIdx === -1) continue;
+      const iface = trimmed.slice(0, colonIdx).trim();
+      if (iface === "lo") continue;
+      const vals = trimmed.slice(colonIdx + 1).trim().split(/\s+/).map(Number);
+      // /proc/net/dev: recv [bytes packets errs drop fifo frame compressed multicast] xmit [bytes packets errs drop fifo colls carrier compressed]
+      agg.rx_bytes += vals[0] || 0;
+      agg.rx_packets += vals[1] || 0;
+      agg.rx_errors += vals[2] || 0;
+      agg.tx_bytes += vals[8] || 0;
+      agg.tx_packets += vals[9] || 0;
+      agg.tx_errors += vals[10] || 0;
+    }
+    return agg;
+  } catch {
+    return empty;
+  }
 }
 
 async function getUsers(): Promise<Record<string, unknown>> {
