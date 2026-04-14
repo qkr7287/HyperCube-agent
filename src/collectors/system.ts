@@ -1,9 +1,10 @@
 import si from "systeminformation";
 import os from "node:os";
+import { readLoggedInUsers } from "../utils/utmp.js";
 import type { SystemMetrics } from "../types/index.js";
 
 export async function collectSystemMetrics(hostname: string): Promise<SystemMetrics> {
-  const [load, cpu, mem, disk, netIfaces, netStats, netConns, dockerInfo] =
+  const [load, cpu, mem, disk, netIfaces, netStats, netConns, dockerInfo, procs, logins] =
     await Promise.all([
       si.currentLoad(),
       si.cpu(),
@@ -13,6 +14,8 @@ export async function collectSystemMetrics(hostname: string): Promise<SystemMetr
       si.networkStats("default"),
       si.networkConnections(),
       si.dockerInfo().catch(() => null),
+      si.processes().catch(() => ({ all: 0, running: 0 })),
+      readLoggedInUsers().catch(() => []),
     ]);
 
   const rootDisk = disk.find((d) => d.mount === "/" || d.mount === "C:\\") ?? disk[0];
@@ -60,6 +63,14 @@ export async function collectSystemMetrics(hostname: string): Promise<SystemMetr
           images: dockerInfo.images ?? 0,
         }
       : { version: "unavailable", containers: 0, images: 0 },
+    processes: {
+      total: procs.all,
+      running: procs.running,
+    },
+    logins: {
+      total: logins.length,
+      active: logins.length,
+    },
   };
 }
 

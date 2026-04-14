@@ -2,6 +2,7 @@ import si from "systeminformation";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import { createLogger } from "../logger.js";
+import { readLoggedInUsers } from "../utils/utmp.js";
 import type { SystemInfoSubCommand } from "../types/index.js";
 
 const log = createLogger("handler:system-info");
@@ -140,7 +141,7 @@ async function getAggregatedNetStats(): Promise<{
     rx_errors: 0, tx_errors: 0,
   };
   try {
-    const content = await fs.readFile("/host/proc/net/dev", "utf-8");
+    const content = await fs.readFile("/host/proc/1/net/dev", "utf-8");
     const lines = content.split("\n").slice(2);
     const agg = { ...empty };
     for (const line of lines) {
@@ -166,18 +167,22 @@ async function getAggregatedNetStats(): Promise<{
 }
 
 async function getUsers(): Promise<Record<string, unknown>> {
-  const users = await si.users();
-
-  return {
-    users: users.map((u) => ({
-      user: u.user,
-      terminal: u.tty,
-      date: u.date,
-      time: u.time,
-      ip: u.ip,
-      command: u.command,
-    })),
-  };
+  try {
+    const entries = await readLoggedInUsers();
+    return {
+      users: entries.map((u) => ({
+        user: u.user,
+        terminal: u.terminal,
+        date: u.loginAt.toISOString().slice(0, 10),
+        time: u.loginAt.toISOString().slice(11, 16),
+        ip: u.ip || u.host,
+        command: "",
+      })),
+    };
+  } catch (err) {
+    log.warn(`utmp read failed: ${(err as Error).message}`);
+    return { users: [] };
+  }
 }
 
 function round(value: number): number {

@@ -44,6 +44,16 @@ export interface DockerSummary {
   images: number;
 }
 
+export interface ProcessesSummary {
+  total: number;
+  running: number;
+}
+
+export interface LoginsSummary {
+  total: number;
+  active: number;
+}
+
 export interface SystemMetrics {
   hostname: string;
   os: string;
@@ -53,6 +63,8 @@ export interface SystemMetrics {
   disk: DiskInfo;
   network: NetworkInfo;
   docker: DockerSummary;
+  processes: ProcessesSummary;
+  logins: LoginsSummary;
 }
 
 // --- Container ---

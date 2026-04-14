@@ -44,6 +44,9 @@ export class DeltaEngine {
 
     // network is always sent (cumulative values)
     delta.network = current.network;
+    // processes/logins always included (small payload, dashboard depends on them)
+    delta.processes = current.processes;
+    delta.logins = current.logins;
     hasChange = true;
 
     this.prevSystem = current;

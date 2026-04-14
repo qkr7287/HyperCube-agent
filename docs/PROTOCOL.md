@@ -13,6 +13,72 @@ Agent   → Backend → Browser: {"type": "command_response", "requestId": "<uui
 - On failure, `data` is omitted and `error` holds a human-readable string.
 - Commands that require Docker return `error: "Docker is not available on this agent."` when the socket is unreachable.
 
+## Streaming Messages (Agent → Backend, unsolicited)
+
+These are pushed by the Agent on a timer. They do **not** carry `requestId`.
+
+### `system_metrics` (every `COLLECT_INTERVAL`, default 2s — delta)
+
+```json
+{
+  "type": "system_metrics",
+  "timestamp": "2026-04-14T10:00:00.000Z",
+  "data": {
+    "hostname": "server_16",
+    "os": "Linux 6.8.0-101-generic",
+    "uptime": 3456789,
+    "cpu": { "cores": 12, "model": "Intel Core i5-10400", "usage": 45.2, "perCore": [...] },
+    "memory": { "total": 16384, "used": 8192, "free": 8192, "usage": 50.0 },
+    "disk": { "total": 512000, "used": 204800, "free": 307200, "usage": 40.0 },
+    "network": { "interfaces": ["eth0"], "connections": 42, "rx": 12345, "tx": 67890 },
+    "docker": { "version": "28.1.0", "containers": 21, "images": 40 },
+    "processes": { "total": 813, "running": 2 },
+    "logins": { "total": 2, "active": 2 }
+  }
+}
+```
+
+- **Delta semantics**: On first send (or reconnect), full object. On subsequent sends, only fields that changed beyond threshold. `network`, `processes`, `logins` are always included (dashboard safety).
+- Thresholds: cpu.usage ≥ 2%, memory.usage ≥ 1%, disk.usage ≥ 1%.
+
+### `containers` (delta on change + full snapshot every 60s)
+
+```json
+{
+  "type": "containers",
+  "timestamp": "...",
+  "data": {
+    "containers": [
+      { "id": "abc...", "name": "nginx", "image": "nginx:latest", "state": "running", "status": "Up 3 days", "ports": [...], "created": 1744617600 }
+    ]
+  }
+}
+```
+
+- **Delta**: sent when a container is added/removed or state changes.
+- **Full snapshot**: sent at least every 60s regardless of delta (safety net against Redis TTL expiry / Backend restart).
+- On reconnect: immediate full snapshot.
+
+### `container_metrics` (every cycle, delta per-container)
+
+```json
+{
+  "type": "container_metrics",
+  "timestamp": "...",
+  "data": {
+    "containerId": "abc...",
+    "cpu": { "usage": 2.1, "cores": 12 },
+    "memory": { "usage": 134217728, "limit": 536870912, "percent": 25.0 },
+    "network": { "rx": 2048, "tx": 1024 },
+    "disk": { "read": 0, "write": 0 }
+  }
+}
+```
+
+- Sent per-container when CPU usage changes ≥ 2%.
+
+---
+
 ## Commands
 
 ### 1. `get_logs`
