@@ -7,11 +7,24 @@ Bidirectional command routing over WebSocket.
 ```
 Browser → Backend → Agent:   {"type": "command", "requestId": "<uuid>", "command": "<name>", "params": {...}}
 Agent   → Backend → Browser: {"type": "command_response", "requestId": "<uuid>", "success": true|false, "data": {...}, "error": "<msg>"}
+Agent   → Backend → Browser: {"type": "command_progress", "requestId": "<uuid>", "step": "...", "percent": N, "message": "...", "context": {...}}
 ```
 
 - `requestId` is echoed verbatim by the Agent.
 - On failure, `data` is omitted and `error` holds a human-readable string.
 - Commands that require Docker return `error: "Docker is not available on this agent."` when the socket is unreachable.
+- `command_progress` is emitted **only during** long-running commands (`create_container`, `compose_up`). It is never a substitute for the final `command_response` — every command, success or fail, ends with exactly one `command_response`.
+
+### `command_progress` schema
+
+| field       | type          | notes                                                                                     |
+|-------------|---------------|-------------------------------------------------------------------------------------------|
+| type        | string        | `"command_progress"`                                                                      |
+| requestId   | string        | matches the originating command                                                           |
+| step        | enum          | `pulling_image` \| `creating` \| `starting` \| `running_check`                            |
+| percent     | number\|null  | 0-100. `null` when unknown                                                                |
+| message     | string        | human-readable status line                                                                |
+| context     | object (opt.) | e.g. `{ "image": "postgres:15", "containerName": "my-pg", "projectName": "my-stack" }`    |
 
 ## Streaming Messages (Agent → Backend, unsolicited)
 
@@ -179,7 +192,121 @@ Container lifecycle action.
 
 ---
 
-### 4. `system_info`
+### 4. `create_container`
+
+Create and start a single container. Emits `command_progress` events during image pull / create / start.
+
+**params**
+
+| field          | type    | required | default            | notes                                      |
+|----------------|---------|----------|--------------------|--------------------------------------------|
+| image          | string  | yes      |                    | e.g. `postgres:15`                         |
+| name           | string  | yes      |                    | must be unique                             |
+| env            | object  | no       | `{}`               | `{ "KEY": "value" }`                       |
+| ports          | array   | no       | `[]`               | `[{ host, container, protocol? }]`         |
+| volumes        | array   | no       | `[]`               | `[{ host, container, mode? }]`             |
+| restart_policy | string  | no       | `"unless-stopped"` | Docker restart policy name                 |
+| pull_if_missing| boolean | no       | `true`             | pull image if not present locally          |
+
+**success.data**
+
+```json
+{
+  "containerId": "abc123def456...",
+  "name": "my-pg",
+  "image": "postgres:15",
+  "state": "running"
+}
+```
+
+**progress steps**: `pulling_image` (per-layer aggregated percent) → `creating` → `starting`.
+
+**errors** — `"image is required"`, `"name is required"`, `"name already exists: <name>"`, `"image pull failed: <reason>"`, `"create failed: <reason>"`, `"start failed: <reason>"`.
+
+---
+
+### 5. `delete_container`
+
+Remove a container. No progress events (fast operation).
+
+**params**
+
+| field         | type    | required | default |
+|---------------|---------|----------|---------|
+| containerId   | string  | yes      |         |
+| force         | boolean | no       | false   |
+| removeVolumes | boolean | no       | false   |
+
+**success.data**
+
+```json
+{ "containerId": "abc123def456...", "removed": true }
+```
+
+**errors** — `"containerId is required"`, `"container not found"`, `"running container, set force=true to remove"`.
+
+---
+
+### 6. `compose_up`
+
+Bring up a docker-compose project. Emits progress events per step.
+
+**params**
+
+| field           | type    | required | default | notes                                 |
+|-----------------|---------|----------|---------|---------------------------------------|
+| projectName     | string  | yes      |         | `docker compose -p <name>`            |
+| composeYaml     | string  | yes      |         | raw YAML body                         |
+| env             | object  | no       | `{}`    | env vars passed to compose (for `${VAR}` substitution) |
+| pull_if_missing | boolean | no       | true    | pull images only if missing           |
+
+**success.data**
+
+```json
+{
+  "projectName": "my-stack",
+  "containers": [
+    { "containerId": "abc...", "name": "my-stack-web-1", "image": "nginx:1.27", "state": "running" },
+    { "containerId": "def...", "name": "my-stack-db-1",  "image": "postgres:15", "state": "running" }
+  ]
+}
+```
+
+Container list is enumerated via `com.docker.compose.project=<projectName>` label filter.
+
+**progress steps**: `pulling_image` / `creating` / `starting` lines streamed from compose CLI stdout/stderr.
+
+**errors** — `"projectName is required"`, `"composeYaml is required"`, `"compose up failed: <reason>"`.
+
+Implementation note: agent runs `docker compose -p <name> -f <tmpfile> up -d --pull missing`. The agent container ships with the docker CLI + compose plugin.
+
+---
+
+### 7. `compose_down`
+
+Stop and remove a compose project. No progress events.
+
+**params**
+
+| field         | type    | required | default | notes                           |
+|---------------|---------|----------|---------|---------------------------------|
+| projectName   | string  | yes      |         |                                 |
+| removeVolumes | boolean | no       | false   | `-v`                            |
+| removeImages  | boolean | no       | false   | `--rmi all`                     |
+
+**success.data**
+
+```json
+{ "projectName": "my-stack", "removedContainerIds": ["abc...", "def..."] }
+```
+
+`removedContainerIds` is the list captured **before** `down` executes (via label filter).
+
+**errors** — `"projectName is required"`, `"compose down failed: <reason>"`.
+
+---
+
+### 8. `system_info`
 
 Host-level system data. One subcommand per invocation.
 

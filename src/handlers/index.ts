@@ -1,18 +1,31 @@
 import type Dockerode from "dockerode";
 import { createLogger } from "../logger.js";
-import type { CommandRequest, CommandResponse } from "../types/index.js";
+import type { CommandRequest, CommandResponse, ProgressEmitter } from "../types/index.js";
 import { handleGetLogs } from "./logs.js";
 import { handleInspect } from "./inspect.js";
 import { handleControl } from "./control.js";
 import { handleSystemInfo } from "./system-info.js";
+import { handleCreateContainer } from "./create-container.js";
+import { handleDeleteContainer } from "./delete-container.js";
+import { handleComposeUp } from "./compose-up.js";
+import { handleComposeDown } from "./compose-down.js";
 
 const log = createLogger("dispatcher");
 
-const DOCKER_COMMANDS = new Set(["get_logs", "inspect", "control"]);
+const DOCKER_COMMANDS = new Set([
+  "get_logs",
+  "inspect",
+  "control",
+  "create_container",
+  "delete_container",
+  "compose_up",
+  "compose_down",
+]);
 
 export async function dispatchCommand(
   docker: Dockerode | null,
   request: CommandRequest,
+  emitProgress: ProgressEmitter,
 ): Promise<CommandResponse> {
   const { requestId, command, params } = request;
 
@@ -42,6 +55,18 @@ export async function dispatchCommand(
         break;
       case "system_info":
         data = await handleSystemInfo(params);
+        break;
+      case "create_container":
+        data = await handleCreateContainer(docker!, params, emitProgress);
+        break;
+      case "delete_container":
+        data = await handleDeleteContainer(docker!, params);
+        break;
+      case "compose_up":
+        data = await handleComposeUp(docker!, params, emitProgress);
+        break;
+      case "compose_down":
+        data = await handleComposeDown(docker!, params);
         break;
       default:
         return {

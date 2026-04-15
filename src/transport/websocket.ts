@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 import { createLogger } from "../logger.js";
-import type { AppConfig, CommandRequest, CommandResponse, WsMessage } from "../types/index.js";
+import type { AppConfig, CommandProgress, CommandRequest, CommandResponse, WsMessage } from "../types/index.js";
 
 const log = createLogger("ws");
 
@@ -121,6 +121,16 @@ export class AgentWebSocket {
       this.ws.send(JSON.stringify(response));
     } catch (err) {
       log.error(`Response send failed: ${(err as Error).message}`);
+    }
+  }
+
+  sendProgress(progress: CommandProgress): void {
+    if (!this.isConnected || !this.ws) return;
+
+    try {
+      this.ws.send(JSON.stringify(progress));
+    } catch (err) {
+      log.error(`Progress send failed: ${(err as Error).message}`);
     }
   }
 

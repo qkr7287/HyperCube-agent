@@ -46,7 +46,13 @@ async function main(): Promise<void> {
   };
 
   ws.onCommand = (request) => {
-    return dispatchCommand(dockerCollector.getDocker(), request);
+    return dispatchCommand(dockerCollector.getDocker(), request, (progress) => {
+      ws.sendProgress({
+        type: "command_progress",
+        requestId: request.requestId,
+        ...progress,
+      });
+    });
   };
 
   // initial connection with retry

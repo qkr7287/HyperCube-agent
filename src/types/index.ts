@@ -110,7 +110,32 @@ export interface WsMessage {
 
 // --- Commands (Backend → Agent) ---
 
-export type CommandName = "get_logs" | "inspect" | "control" | "system_info";
+export type CommandName =
+  | "get_logs"
+  | "inspect"
+  | "control"
+  | "system_info"
+  | "create_container"
+  | "delete_container"
+  | "compose_up"
+  | "compose_down";
+
+export type ProgressStep =
+  | "pulling_image"
+  | "creating"
+  | "starting"
+  | "running_check";
+
+export interface CommandProgress {
+  type: "command_progress";
+  requestId: string;
+  step: ProgressStep;
+  percent: number | null;
+  message: string;
+  context?: Record<string, unknown>;
+}
+
+export type ProgressEmitter = (progress: Omit<CommandProgress, "type" | "requestId">) => void;
 
 export interface CommandRequest {
   type: "command";
