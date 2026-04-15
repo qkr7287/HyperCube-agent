@@ -4,7 +4,7 @@ import { collectSystemMetrics } from "./collectors/system.js";
 import { DockerCollector } from "./collectors/docker.js";
 import { DeltaEngine } from "./sync/delta.js";
 import { dispatchCommand } from "./handlers/index.js";
-import { registerAgent, pollApproval } from "./transport/register.js";
+import { registerAgent } from "./transport/register.js";
 import { AgentWebSocket } from "./transport/websocket.js";
 
 const log = createLogger("agent");
@@ -26,13 +26,13 @@ async function main(): Promise<void> {
     log.warn("Docker not available. System metrics only. Will retry Docker every 30s.");
   }
 
-  // register with backend
+  // register with backend (auto-approved — token returned immediately)
   const registration = await registerAgent(config);
-
-  // wait for approval if pending
-  let token = registration.token;
-  if (registration.status === "pending" || !token) {
-    token = await pollApproval(config, registration.id, abortController.signal);
+  const token = registration.token;
+  if (!token) {
+    throw new Error(
+      `Registration response missing token (status=${registration.status}). Backend must auto-approve.`,
+    );
   }
 
   // connect websocket
