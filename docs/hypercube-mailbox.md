@@ -25,6 +25,44 @@ URL (이 mailbox):
   - 추가 정보 요청 또는 후속 이슈
 - 완료 항목은 보존 (히스토리). 삭제 금지
 
+## 압축 정책 (Compaction Policy)
+
+파일이 길어지는 걸 방지하기 위해 **하이브리드 방식**으로 관리한다.
+
+### 규칙
+
+1. **최근 5개 항목**은 full detail 유지 (본문 검증 결과·시나리오·질문답변 포함)
+2. **그 이전 항목**은 본 파일에서 한 줄 요약으로 rewrite:
+   - 형식: `## YYYY-MM-DD — Re: <제목> (완료 — agent <hash>)` 뒤에 한 줄만:
+     `> <핵심 처리 내용 한 줄>. 상세: git show <hash>`
+3. **원본 상세는 git history에 보존** → 언제든 `git show <commit>` 또는 GitHub 해당 commit 페이지로 복원 가능
+4. **새 항목 추가 시** (= 항목 6개째) 자동으로 가장 오래된 full detail 항목 하나를 압축
+5. **예외**: 미완료/진행중 항목은 나이 무관 full detail 유지
+
+### 트리거
+
+- 메일함에 새 항목을 추가할 때 항목 수가 5를 초과하면, **같은 커밋**에서 가장 오래된 full entry를 압축
+- 압축 대상 판단은 "완료일 가장 오래된 것"
+
+### 압축 예시 (before → after)
+
+```markdown
+## 2026-04-13 — Re: 명령 라우팅 프로토콜 도입 (완료 — agent `16bb0b9`)
+
+### 처리된 항목
+- 4종 명령 (system_info, inspect, get_logs, control) 응답 schema 확정
+- docs/PROTOCOL.md 작성 (HyperCube에 docs/agent-protocol.md로 미러링)
+...
+```
+
+→
+
+```markdown
+## 2026-04-13 — Re: 명령 라우팅 프로토콜 도입 (완료 — agent `16bb0b9`)
+
+> 4종 명령 응답 schema 확정, PROTOCOL.md 작성. 상세: git show 16bb0b9
+```
+
 ---
 
 ## 2026-04-16 — ACK: 컨테이너 lifecycle E2E 확인
