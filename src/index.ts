@@ -13,7 +13,9 @@ const abortController = new AbortController();
 let collectTimer: ReturnType<typeof setInterval> | null = null;
 let collecting = false;
 let lastContainersFullSnapshotAt = 0;
+let lastContainerMetricsFullSnapshotAt = 0;
 const CONTAINERS_FULL_SNAPSHOT_INTERVAL_MS = 60_000;
+const CONTAINER_METRICS_FULL_SNAPSHOT_INTERVAL_MS = 60_000;
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -43,6 +45,7 @@ async function main(): Promise<void> {
     log.info("Reconnected. Sending full snapshot on next cycle.");
     deltaEngine.reset();
     lastContainersFullSnapshotAt = 0;
+    lastContainerMetricsFullSnapshotAt = 0;
   };
 
   ws.onCommand = (request) => {
@@ -139,6 +142,18 @@ async function collectAndSend(
           timestamp: now,
         });
       }
+    }
+
+    // periodic full snapshot for container_metrics (safety net for idle containers)
+    if (nowMs - lastContainerMetricsFullSnapshotAt >= CONTAINER_METRICS_FULL_SNAPSHOT_INTERVAL_MS) {
+      for (const [, m] of Object.entries(metrics)) {
+        ws.send({
+          type: "container_metrics",
+          data: m as unknown as Record<string, unknown>,
+          timestamp: now,
+        });
+      }
+      lastContainerMetricsFullSnapshotAt = nowMs;
     }
   }
 }

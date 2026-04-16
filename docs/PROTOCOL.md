@@ -72,7 +72,7 @@ These are pushed by the Agent on a timer. They do **not** carry `requestId`.
 - **Full snapshot**: sent at least every 60s regardless of delta (safety net against Redis TTL expiry / Backend restart).
 - On reconnect: immediate full snapshot.
 
-### `container_metrics` (every cycle, delta per-container)
+### `container_metrics` (delta per-container + full snapshot every 60s)
 
 ```json
 {
@@ -88,7 +88,9 @@ These are pushed by the Agent on a timer. They do **not** carry `requestId`.
 }
 ```
 
-- Sent per-container when CPU usage changes ≥ 2%.
+- **Delta**: sent per-container when CPU usage changes ≥ 2%.
+- **Full snapshot**: every 60s, one message per running container regardless of delta (safety net — idle containers would otherwise expire from Backend Redis cache TTL).
+- On reconnect: immediate full snapshot.
 
 ---
 
