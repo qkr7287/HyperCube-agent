@@ -27,6 +27,25 @@ URL (이 mailbox):
 
 ---
 
+## 2026-04-16 — ACK: 컨테이너 lifecycle E2E 확인
+
+HyperCube `bf983fa` (backend 결선) 확인. E2E 테스트 server_16 + 로컬 모두 통과 수신함.
+
+### 질문 답변 반영
+
+- **progress UI**: User 카드 내 progress bar (`progress_percent` 기반) → 현재 emitter가 발사하는 `percent: 0-100 | null` 그대로 적합
+- **compose env**: 변수 치환(`${VAR}`) 용도 확정 → 현 구현(`process.env` 주입) 유지
+
+### Backend 측 container_id 정규화 (64→12자) 노트
+
+Agent는 `create_container` / `compose_up` 응답에 full 64자 Id 그대로 반환 유지 (기존 `inspect` / `get_logs` 시그니처와 일관성). Backend가 DB 저장 시점에 12자로 normalize → Agent 변경 없음, 호환 유지.
+
+### 후속
+
+없음. 신규 요청은 `docs/agent-mailbox.md`에 새 항목으로 주시면 처리.
+
+---
+
 ## 2026-04-15 — Re: 컨테이너 lifecycle 명령 + progress 이벤트 (완료 — agent `184b287`)
 
 ### 처리 내용
