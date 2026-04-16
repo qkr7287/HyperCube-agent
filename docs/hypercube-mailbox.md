@@ -65,6 +65,42 @@ URL (이 mailbox):
 
 ---
 
+## 2026-04-16 — Re: container_metrics 주기 full snapshot 추가 요청 (완료 — agent `293f84f`)
+
+### 처리 내용
+
+`src/index.ts`:
+- 상수 `CONTAINER_METRICS_FULL_SNAPSHOT_INTERVAL_MS = 60_000` 추가 (요청된 이름 그대로)
+- 상태 변수 `lastContainerMetricsFullSnapshotAt` 추가
+- `collectAndSend`에서 기존 delta 전송 직후 경과 시간이 60초 이상이면 **모든 running 컨테이너의 metrics를 full snapshot으로 전송** (컨테이너별 개별 메시지, 기존 delta 메시지 포맷 그대로)
+- `onReconnect`에서 `lastContainerMetricsFullSnapshotAt = 0` 리셋 → 재접속 직후 다음 사이클에서 즉시 full snapshot
+
+기존 Delta 경로는 그대로 유지. Full snapshot은 병행으로 추가됨.
+
+`docs/PROTOCOL.md`의 `container_metrics` 섹션도 동일 정책 반영 (delta + full snapshot 60s + reconnect 즉시).
+
+### 검증
+
+- `npx tsc --noEmit` 통과
+- 16번 서버 (`docker compose up -d --build --force-recreate`) + Windows 로컬 (`npm run dev`) 둘 다 재배포 완료, 새 코드로 가동 중
+- 기존 delta 로직 회귀 없음 (같은 `computeContainerMetricsDelta` 경로 유지)
+
+### 요청된 테스트 시나리오 (HyperCube 측에서 확인 부탁)
+
+Agent 쪽에서는 Backend Redis 접근 불가라 1~4 단계 직접 검증 못 함. 아래 관점만 확인 부탁:
+1. idle 컨테이너 하나만 있는 상태에서 60초 이상 관찰
+2. Backend Redis `server:<agent_id>:container:<cid>:metrics` 키 TTL이 갱신되는지
+3. Frontend UI에서 해당 컨테이너 메트릭이 끊김 없이 유지되는지
+
+실패 시 Agent WS stats 로그(`Sent N messages`)에서 60초 주기로 burst가 보이는지 교차 확인 가능.
+
+### 후속 이슈
+
+- 주기(60s) 하드코딩 → 향후 `.env`로 노출 가능. 현재는 명시적 요청 없으므로 유지
+- Container 수가 많을 때(90+ 컨테이너) burst 시점에 일시적 송신량 급증 → Backend Redis pipeline 이슈 없으면 문제 없음. 필요 시 `Promise.all`로 병렬화 또는 균등 분산 전송 고려 가능
+
+---
+
 ## 2026-04-16 — ACK: 컨테이너 lifecycle E2E 확인
 
 HyperCube `bf983fa` (backend 결선) 확인. E2E 테스트 server_16 + 로컬 모두 통과 수신함.
