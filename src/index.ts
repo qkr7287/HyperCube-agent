@@ -61,11 +61,20 @@ async function main(): Promise<void> {
   // initial connection with retry
   await connectWithRetry(ws);
 
-  // send first snapshot (no timeout — first systeminformation call can be slow)
+  // send first snapshot with timeout — if si.* hangs, still start collect loop
   log.info("Sending initial snapshot...");
-  await collectAndSend(config, ws, deltaEngine, dockerCollector);
+  try {
+    await Promise.race([
+      collectAndSend(config, ws, deltaEngine, dockerCollector),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("initial snapshot timeout")), 1_000),
+      ),
+    ]);
+  } catch (err) {
+    log.warn(`Initial snapshot skipped: ${(err as Error).message}`);
+  }
 
-  // start collection loop after first snapshot
+  // start collection loop regardless of initial snapshot result
   log.info(`Collecting every ${config.collectInterval}ms`);
   collectTimer = setInterval(() => {
     if (collecting) {

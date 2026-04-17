@@ -11,12 +11,15 @@ const JITTER_RANGE = 500;
 const PING_INTERVAL = 30_000;
 const PONG_TIMEOUT = 10_000;
 const SEND_STATS_INTERVAL = 60_000;
+// Backend sends heartbeat every 15s; terminate if none arrives for this long.
+const SILENCE_TIMEOUT = 60_000;
 
 export class AgentWebSocket {
   private ws: WebSocket | null = null;
   private backoff = INITIAL_BACKOFF;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
+  private silenceTimer: ReturnType<typeof setTimeout> | null = null;
   private statsTimer: ReturnType<typeof setInterval> | null = null;
   private sentCount = 0;
   private sentBytes = 0;
@@ -53,15 +56,19 @@ export class AgentWebSocket {
         this.backoff = INITIAL_BACKOFF;
         this.startHeartbeat();
         this.startSendStats();
+        this.resetSilenceTimer();
         resolved = true;
         resolve();
       });
 
       this.ws.on("message", (data) => {
+        this.resetSilenceTimer();
         try {
           const msg = JSON.parse(data.toString());
           if (msg.type === "connection") {
             log.info(`Server: ${msg.message}`);
+          } else if (msg.type === "heartbeat") {
+            // silence timer already reset; no further action needed
           } else if (msg.type === "command" && this.onCommand) {
             this.onCommand(msg as CommandRequest)
               .then((response) => this.sendResponse(response))
@@ -82,6 +89,7 @@ export class AgentWebSocket {
         log.warn(`Disconnected: ${code} ${reason.toString()}`);
         this.stopHeartbeat();
         this.stopSendStats();
+        this.stopSilenceTimer();
         if (!resolved) {
           resolved = true;
           reject(new Error(`WebSocket closed: ${code}`));
@@ -138,6 +146,7 @@ export class AgentWebSocket {
     this.closed = true;
     this.stopHeartbeat();
     this.stopSendStats();
+    this.stopSilenceTimer();
     if (this.ws) {
       this.ws.close(1000, "Agent shutting down");
       this.ws = null;
@@ -203,6 +212,21 @@ export class AgentWebSocket {
     if (this.pongTimer) {
       clearTimeout(this.pongTimer);
       this.pongTimer = null;
+    }
+  }
+
+  private resetSilenceTimer(): void {
+    this.stopSilenceTimer();
+    this.silenceTimer = setTimeout(() => {
+      log.warn(`No server messages for ${SILENCE_TIMEOUT / 1000}s. Reconnecting.`);
+      this.ws?.terminate();
+    }, SILENCE_TIMEOUT);
+  }
+
+  private stopSilenceTimer(): void {
+    if (this.silenceTimer) {
+      clearTimeout(this.silenceTimer);
+      this.silenceTimer = null;
     }
   }
 }

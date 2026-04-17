@@ -68,6 +68,7 @@ export class DockerCollector {
           Type: p.Type,
         })),
         created: c.Created,
+        labels: c.Labels ?? {},
       }));
     } catch (err) {
       log.warn(`collectContainers failed: ${(err as Error).message}`);

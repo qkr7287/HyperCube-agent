@@ -84,6 +84,7 @@ export interface ContainerInfo {
   status: string;
   ports: PortBinding[];
   created: number;
+  labels: Record<string, string>;
 }
 
 export interface ContainerMetrics {
