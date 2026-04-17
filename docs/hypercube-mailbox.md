@@ -65,6 +65,63 @@ URL (이 mailbox):
 
 ---
 
+## 2026-04-17 — Re: containers 메시지에 networks / mounts 필드 추가 (완료 — agent `f17b9e7`)
+
+### 처리 내용
+
+`src/types/index.ts`:
+- `ContainerMount` 신규 타입: `{ name: string; type: "volume" }`
+- `ContainerInfo` 에 optional 필드 추가: `networks?: string[]`, `mounts?: ContainerMount[]`
+
+`src/collectors/docker.ts`:
+- `collectContainers()` 매핑에서 `listContainers()` 응답의
+  `c.NetworkSettings.Networks` / `c.Mounts`를 그대로 활용 (별도 inspect 호출 없음)
+- 헬퍼 `extractUserNetworks(c)` — `NetworkSettings.Networks` 키 중 built-in
+  3종 (`bridge`, `host`, `none`) 제외하고 사용자 정의 네트워크만 반환
+- 헬퍼 `extractVolumeMounts(c)` — `Mounts` 중 `Type === "volume"` 이고
+  이름이 있는 항목만 `{ name, type: "volume" }` 형태로 매핑. bind/tmpfs는 스킵
+
+두 필드 모두 optional, 기존 payload와 완전 하위 호환. Backend/Frontend가
+없는 걸로 해석해도 동작 영향 없음.
+
+### 배포 상태
+
+- Agent 코드: `main` 에 `f17b9e7` 푸시 완료
+- server-41 (`192.168.0.41`, agent_id `65fd4b18-…`): `docker compose up -d --build` 재배포 완료
+- server_16 (`192.168.0.16`, agent_id `e08dbdde-…`): `docker compose up -d --build` 재배포 완료
+- local-windows (`121a4019-…`): Windows `systeminformation` 첫 호출 hang 이슈로 폐기
+
+### 검증
+
+- `npx tsc --noEmit` 통과
+- server-41에서 `hypercube-agent-agent-1` 샘플 검사:
+  - `NetworkSettings.Networks` 키 = `["hypercube-agent_default"]` → built-in 제외 필터 정상, user network만 반환
+  - `Mounts` 전부 `Type="bind"` → volume 필터 결과 빈 배열, bind 제외 정상
+- server_16에서 `agkids_api_minio` 샘플 검사:
+  - volume 타입 mount `agkidscanvasai_minio_data` 존재 → `{ name: "agkidscanvasai_minio_data", type: "volume" }` 형태로 포함 예상
+
+Agent 측은 payload 포맷을 직접 실측할 수단이 없어(Redis 미노출), 실제
+HyperCube Redis / Browser 화면에서 **검증 시나리오 4개** 확인은 HyperCube 측에 위임.
+
+### 주의 / 확인 요청
+
+- HyperCube repo `dev` branch의 `docs/agent-mailbox.md` 및 언급된
+  `docs/agent-schema-v2.md` 는 이 작업 시점에 **remote에 아직 push되지
+  않은 상태**였음. 따라서 스펙은 Agent 세션에 전달된 한 줄 요약
+  (networks: NetworkSettings.Networks keys - {bridge, host, none},
+  mounts: type=="volume"만 `{name, type}`)만을 근거로 구현했음.
+- 원문 스펙에 추가 제약(예: 특정 네트워크 driver 제외, 이름 규칙 등)이
+  있다면 재확인 후 알려주시면 반영하겠습니다.
+
+### 후속 이슈
+
+- 현재 `labels` 필드와 `networks` / `mounts`는 모두 `listContainers()` 응답에
+  포함된 값을 사용 → 별도 docker inspect 호출 불필요, 성능 영향 없음
+- delta 엔진은 container 객체 전체를 비교하므로 network/volume 변경도
+  자동으로 감지돼 delta에 포함됨 (추가 변경 불필요)
+
+---
+
 ## 2026-04-16 — Re: container_metrics 주기 full snapshot 추가 요청 (완료 — agent `293f84f`)
 
 ### 처리 내용
