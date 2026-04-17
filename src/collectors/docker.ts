@@ -69,6 +69,8 @@ export class DockerCollector {
         })),
         created: c.Created,
         labels: c.Labels ?? {},
+        networks: extractUserNetworks(c),
+        mounts: extractVolumeMounts(c),
       }));
     } catch (err) {
       log.warn(`collectContainers failed: ${(err as Error).message}`);
@@ -170,4 +172,23 @@ function calculateCpuPercent(stats: any): number {
 
 function round(value: number): number {
   return Math.round(value * 10) / 10;
+}
+
+const BUILT_IN_NETWORKS = new Set(["bridge", "host", "none"]);
+
+function extractUserNetworks(c: Dockerode.ContainerInfo): string[] {
+  const networks = c.NetworkSettings?.Networks ?? {};
+  return Object.keys(networks).filter((name) => !BUILT_IN_NETWORKS.has(name));
+}
+
+interface DockerMount {
+  Type?: string;
+  Name?: string;
+}
+
+function extractVolumeMounts(c: Dockerode.ContainerInfo): { name: string; type: "volume" }[] {
+  const mounts = (c.Mounts ?? []) as DockerMount[];
+  return mounts
+    .filter((m) => m.Type === "volume" && typeof m.Name === "string" && m.Name.length > 0)
+    .map((m) => ({ name: m.Name as string, type: "volume" as const }));
 }

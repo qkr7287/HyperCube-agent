@@ -76,6 +76,11 @@ export interface PortBinding {
   Type: string;
 }
 
+export interface ContainerMount {
+  name: string;
+  type: "volume";
+}
+
 export interface ContainerInfo {
   id: string;
   name: string;
@@ -85,6 +90,8 @@ export interface ContainerInfo {
   ports: PortBinding[];
   created: number;
   labels: Record<string, string>;
+  networks?: string[];
+  mounts?: ContainerMount[];
 }
 
 export interface ContainerMetrics {
