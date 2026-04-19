@@ -100,6 +100,27 @@ export interface ContainerMetrics {
   memory: { usage: number; limit: number; percent: number };
   network: { rx: number; tx: number };
   disk: { read: number; write: number };
+  network_stats: ContainerNetworkStat[];
+}
+
+export type NetworkMappingMode =
+  | "exact"
+  | "single-network-fallback"
+  | "unresolved";
+
+export interface ContainerNetworkStat {
+  network_name: string | null;
+  interface_name: string | null;
+  mapping_mode: NetworkMappingMode;
+  rx_bytes: number;
+  tx_bytes: number;
+  rx_rate_bps: number | null;
+  tx_rate_bps: number | null;
+  rx_packets: number | null;
+  tx_packets: number | null;
+  errors_rx: number | null;
+  errors_tx: number | null;
+  timestamp: string | null;
 }
 
 // --- WebSocket Messages ---

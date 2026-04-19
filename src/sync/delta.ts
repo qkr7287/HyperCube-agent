@@ -8,6 +8,7 @@ const CPU_THRESHOLD = 2;
 const MEMORY_THRESHOLD = 1;
 const DISK_THRESHOLD = 1;
 const CONTAINER_CPU_THRESHOLD = 2;
+const CONTAINER_NETWORK_RATE_THRESHOLD = 1;
 
 export class DeltaEngine {
   private prevSystem: SystemMetrics | null = null;
@@ -114,7 +115,8 @@ export class DeltaEngine {
       }
 
       if (
-        Math.abs(prev.cpu.usage - metrics.cpu.usage) >= CONTAINER_CPU_THRESHOLD
+        Math.abs(prev.cpu.usage - metrics.cpu.usage) >= CONTAINER_CPU_THRESHOLD ||
+        hasContainerNetworkChanged(prev, metrics)
       ) {
         changed[id] = metrics;
         hasChange = true;
@@ -131,4 +133,52 @@ export class DeltaEngine {
     this.prevContainerStates = null;
     this.prevContainerMetrics = null;
   }
+}
+
+function hasContainerNetworkChanged(
+  prev: ContainerMetrics,
+  current: ContainerMetrics,
+): boolean {
+  if (
+    prev.network.rx !== current.network.rx ||
+    prev.network.tx !== current.network.tx ||
+    prev.network_stats.length !== current.network_stats.length
+  ) {
+    return true;
+  }
+
+  for (let i = 0; i < current.network_stats.length; i += 1) {
+    const prevStat = prev.network_stats[i];
+    const currentStat = current.network_stats[i];
+
+    if (!prevStat || !currentStat) return true;
+    if (
+      prevStat.network_name !== currentStat.network_name ||
+      prevStat.interface_name !== currentStat.interface_name ||
+      prevStat.mapping_mode !== currentStat.mapping_mode ||
+      prevStat.rx_bytes !== currentStat.rx_bytes ||
+      prevStat.tx_bytes !== currentStat.tx_bytes ||
+      prevStat.rx_packets !== currentStat.rx_packets ||
+      prevStat.tx_packets !== currentStat.tx_packets ||
+      prevStat.errors_rx !== currentStat.errors_rx ||
+      prevStat.errors_tx !== currentStat.errors_tx
+    ) {
+      return true;
+    }
+
+    if (
+      hasNullableRateChanged(prevStat.rx_rate_bps, currentStat.rx_rate_bps) ||
+      hasNullableRateChanged(prevStat.tx_rate_bps, currentStat.tx_rate_bps)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function hasNullableRateChanged(prev: number | null, current: number | null): boolean {
+  if (prev === current) return false;
+  if (prev === null || current === null) return true;
+  return Math.abs(prev - current) >= CONTAINER_NETWORK_RATE_THRESHOLD;
 }

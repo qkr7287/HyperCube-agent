@@ -1,6 +1,11 @@
 import Dockerode from "dockerode";
 import { createLogger } from "../logger.js";
-import type { ContainerInfo, ContainerMetrics } from "../types/index.js";
+import type {
+  ContainerInfo,
+  ContainerMetrics,
+  ContainerNetworkStat,
+  NetworkMappingMode,
+} from "../types/index.js";
 
 const RETRY_INTERVAL = 30_000;
 const CONCURRENCY_LIMIT = 10;
@@ -11,6 +16,7 @@ export class DockerCollector {
   private docker: Dockerode;
   private available = false;
   private lastRetryAt = 0;
+  private previousNetworkSamples = new Map<string, Map<string, NetworkSample>>();
 
   constructor(socketPath: string) {
     this.docker = new Dockerode({ socketPath });
@@ -87,11 +93,12 @@ export class DockerCollector {
 
     const running = containers.filter((c) => c.state === "running");
     const metrics: Record<string, ContainerMetrics> = {};
+    const runningIds = new Set(running.map((c) => c.id));
 
     for (let i = 0; i < running.length; i += CONCURRENCY_LIMIT) {
       const batch = running.slice(i, i + CONCURRENCY_LIMIT);
       const results = await Promise.allSettled(
-        batch.map((c) => this.collectSingleMetrics(c.id)),
+        batch.map((c) => this.collectSingleMetrics(c)),
       );
 
       for (const result of results) {
@@ -101,12 +108,14 @@ export class DockerCollector {
       }
     }
 
+    this.pruneNetworkSamples(runningIds);
     return metrics;
   }
 
   private async collectSingleMetrics(
-    containerId: string,
+    containerInfo: ContainerInfo,
   ): Promise<ContainerMetrics | null> {
+    const containerId = containerInfo.id;
     const container = this.docker.getContainer(containerId);
     const stats = await Promise.race([
       container.stats({ stream: false }),
@@ -119,6 +128,8 @@ export class DockerCollector {
     const cpuUsage = calculateCpuPercent(s);
     const memUsage = s.memory_stats?.usage ?? 0;
     const memLimit = s.memory_stats?.limit ?? 1;
+    const sampleTimestamp = typeof s.read === "string" ? s.read : null;
+    const sampleTimeMs = parseSampleTime(sampleTimestamp);
 
     const networks = s.networks ?? {};
     let rxTotal = 0;
@@ -128,6 +139,12 @@ export class DockerCollector {
       rxTotal += net.rx_bytes ?? 0;
       txTotal += net.tx_bytes ?? 0;
     }
+    const networkStats = this.buildNetworkStats(
+      containerInfo,
+      networks as Record<string, RawDockerNetworkCounters>,
+      sampleTimestamp,
+      sampleTimeMs,
+    );
 
     const blkio = s.blkio_stats?.io_service_bytes_recursive ?? [];
     let diskRead = 0;
@@ -151,7 +168,76 @@ export class DockerCollector {
       },
       network: { rx: rxTotal, tx: txTotal },
       disk: { read: diskRead, write: diskWrite },
+      network_stats: networkStats,
     };
+  }
+
+  private buildNetworkStats(
+    containerInfo: ContainerInfo,
+    rawNetworks: Record<string, RawDockerNetworkCounters>,
+    sampleTimestamp: string | null,
+    sampleTimeMs: number,
+  ): ContainerNetworkStat[] {
+    const interfaceEntries = Object.entries(rawNetworks).sort(([a], [b]) => a.localeCompare(b));
+    const userNetworks = (containerInfo.networks ?? []).filter((name) => name.length > 0);
+    const exactMatches = new Set(userNetworks.filter((name) => rawNetworks[name] !== undefined));
+    const allowSingleNetworkFallback =
+      userNetworks.length === 1 && interfaceEntries.length === 1 && exactMatches.size === 0;
+
+    const previousByInterface = this.previousNetworkSamples.get(containerInfo.id) ?? new Map();
+    const nextSamples = new Map<string, NetworkSample>();
+    const stats = interfaceEntries.map(([interfaceName, counters]) => {
+      const prev = previousByInterface.get(interfaceName);
+      const networkName =
+        exactMatches.has(interfaceName)
+          ? interfaceName
+          : allowSingleNetworkFallback
+            ? userNetworks[0]
+            : null;
+      const mappingMode: NetworkMappingMode =
+        exactMatches.has(interfaceName)
+          ? "exact"
+          : allowSingleNetworkFallback
+            ? "single-network-fallback"
+            : "unresolved";
+
+      const rxBytes = counters.rx_bytes ?? 0;
+      const txBytes = counters.tx_bytes ?? 0;
+      const rxRate = calculateRate(rxBytes, prev?.rxBytes, sampleTimeMs, prev?.sampleTimeMs);
+      const txRate = calculateRate(txBytes, prev?.txBytes, sampleTimeMs, prev?.sampleTimeMs);
+
+      nextSamples.set(interfaceName, {
+        rxBytes,
+        txBytes,
+        sampleTimeMs,
+      });
+
+      return {
+        network_name: networkName,
+        interface_name: interfaceName,
+        mapping_mode: mappingMode,
+        rx_bytes: rxBytes,
+        tx_bytes: txBytes,
+        rx_rate_bps: rxRate,
+        tx_rate_bps: txRate,
+        rx_packets: asNullableNumber(counters.rx_packets),
+        tx_packets: asNullableNumber(counters.tx_packets),
+        errors_rx: asNullableNumber(counters.rx_errors),
+        errors_tx: asNullableNumber(counters.tx_errors),
+        timestamp: sampleTimestamp,
+      } satisfies ContainerNetworkStat;
+    });
+
+    this.previousNetworkSamples.set(containerInfo.id, nextSamples);
+    return stats;
+  }
+
+  private pruneNetworkSamples(runningIds: ReadonlySet<string>): void {
+    for (const containerId of this.previousNetworkSamples.keys()) {
+      if (!runningIds.has(containerId)) {
+        this.previousNetworkSamples.delete(containerId);
+      }
+    }
   }
 }
 
@@ -174,6 +260,10 @@ function round(value: number): number {
   return Math.round(value * 10) / 10;
 }
 
+function roundRate(value: number): number {
+  return Math.round(value);
+}
+
 const BUILT_IN_NETWORKS = new Set(["bridge", "host", "none"]);
 
 function extractUserNetworks(c: Dockerode.ContainerInfo): string[] {
@@ -191,4 +281,46 @@ function extractVolumeMounts(c: Dockerode.ContainerInfo): { name: string; type: 
   return mounts
     .filter((m) => m.Type === "volume" && typeof m.Name === "string" && m.Name.length > 0)
     .map((m) => ({ name: m.Name as string, type: "volume" as const }));
+}
+
+interface RawDockerNetworkCounters {
+  rx_bytes?: number;
+  tx_bytes?: number;
+  rx_packets?: number;
+  tx_packets?: number;
+  rx_errors?: number;
+  tx_errors?: number;
+}
+
+interface NetworkSample {
+  rxBytes: number;
+  txBytes: number;
+  sampleTimeMs: number;
+}
+
+function calculateRate(
+  currentBytes: number,
+  previousBytes: number | undefined,
+  currentTimeMs: number,
+  previousTimeMs: number | undefined,
+): number | null {
+  if (previousBytes === undefined || previousTimeMs === undefined) return null;
+
+  const elapsedMs = currentTimeMs - previousTimeMs;
+  if (elapsedMs <= 0) return null;
+
+  const delta = currentBytes - previousBytes;
+  if (delta < 0) return null;
+
+  return roundRate((delta / elapsedMs) * 1000);
+}
+
+function parseSampleTime(value: string | null): number {
+  if (!value) return Date.now();
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+function asNullableNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
