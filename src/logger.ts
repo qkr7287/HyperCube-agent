@@ -1,3 +1,4 @@
+// Minimal tagged logger. LOG_LEVEL env var gates output.
 type LogLevel = "debug" | "info" | "warn" | "error";
 
 const LOG_LEVELS: Record<LogLevel, number> = {
