@@ -68,6 +68,9 @@ jobs:
               -o StrictHostKeyChecking=no \
               -p ${{ matrix.port }} \
               ${{ matrix.user }}@${{ matrix.host }} \
-              "docker logs hypercube-agent-prod-agent-1 --since 30s 2>&1 | grep -E 'Collecting every' >/dev/null && \
-               echo 'OK: agent running' || \
-               (echo 'FAIL: agent did not start'; docker logs hypercube-agent-prod-agent-1 --tail 30; exit 1)"
+              "docker ps --format '{{.Names}}' | grep -qx hypercube-agent-prod-agent-1 || \
+                 (echo 'FAIL: container not running'; exit 1); \
+               docker logs hypercube-agent-prod-agent-1 --since 90s 2>&1 | \
+                 grep -qE 'Sent [0-9]+ messages|Collecting every' && \
+                 echo 'OK: agent healthy' || \
+                 (echo 'FAIL: no recent activity'; docker logs hypercube-agent-prod-agent-1 --tail 30; exit 1)"
