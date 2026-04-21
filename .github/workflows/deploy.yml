@@ -1,0 +1,73 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Type check & build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run build
+
+  deploy:
+    needs: verify
+    name: Deploy ${{ matrix.name }}
+    runs-on: [self-hosted, lan-runner]
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        include:
+          - name: server-16
+            host: 192.168.0.16
+            user: root
+            port: 2022
+            path: /home/agics-ai/docker/hypercube-agent
+          - name: server-41
+            host: 192.168.0.41
+            user: root
+            port: 2022
+            path: /home/stdt/docker/hypercube-agent
+          - name: server-63
+            host: 192.168.0.63
+            user: agics
+            port: 2022
+            path: /docker/hypercube-agent
+    steps:
+      - name: Redeploy
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key \
+              -o StrictHostKeyChecking=no \
+              -p ${{ matrix.port }} \
+              ${{ matrix.user }}@${{ matrix.host }} \
+              "cd ${{ matrix.path }} && \
+               git fetch --all && \
+               git reset --hard origin/main && \
+               docker compose -p hypercube-agent-prod up -d --build"
+
+      - name: Verify agent is healthy
+        run: |
+          set -euo pipefail
+          sleep 5
+          ssh -i ~/.ssh/deploy_key \
+              -o StrictHostKeyChecking=no \
+              -p ${{ matrix.port }} \
+              ${{ matrix.user }}@${{ matrix.host }} \
+              "docker logs hypercube-agent-prod-agent-1 --since 30s 2>&1 | grep -E 'Collecting every' >/dev/null && \
+               echo 'OK: agent running' || \
+               (echo 'FAIL: agent did not start'; docker logs hypercube-agent-prod-agent-1 --tail 30; exit 1)"
