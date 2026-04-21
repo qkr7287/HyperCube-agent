@@ -13,6 +13,16 @@ const PONG_TIMEOUT = 10_000;
 const SEND_STATS_INTERVAL = 60_000;
 // Backend sends heartbeat every 15s; terminate if none arrives for this long.
 const SILENCE_TIMEOUT = 60_000;
+// Pending queue for command_response / command_progress when socket is down.
+const MAX_PENDING_QUEUE = 1_000;
+const MAX_PENDING_AGE_MS = 24 * 60 * 60 * 1000;
+const DRAIN_INTERVAL_MS = 50; // ~20 msg/s
+
+interface PendingMessage {
+  payload: string;
+  kind: "response" | "progress";
+  enqueuedAt: number;
+}
 
 export class AgentWebSocket {
   private ws: WebSocket | null = null;
@@ -24,6 +34,8 @@ export class AgentWebSocket {
   private sentCount = 0;
   private sentBytes = 0;
   private closed = false;
+  private pendingQueue: PendingMessage[] = [];
+  private drainTimer: ReturnType<typeof setTimeout> | null = null;
 
   onReconnect: (() => void) | null = null;
   onCommand: ((request: CommandRequest) => Promise<CommandResponse>) | null = null;
@@ -67,6 +79,10 @@ export class AgentWebSocket {
           const msg = JSON.parse(data.toString());
           if (msg.type === "connection") {
             log.info(`Server: ${msg.message}`);
+            if (this.pendingQueue.length > 0) {
+              log.info(`Draining ${this.pendingQueue.length} queued message(s).`);
+              this.scheduleDrain();
+            }
           } else if (msg.type === "heartbeat") {
             // silence timer already reset; no further action needed
           } else if (msg.type === "command" && this.onCommand) {
@@ -90,6 +106,7 @@ export class AgentWebSocket {
         this.stopHeartbeat();
         this.stopSendStats();
         this.stopSilenceTimer();
+        this.stopDrain();
         if (!resolved) {
           resolved = true;
           reject(new Error(`WebSocket closed: ${code}`));
@@ -123,23 +140,11 @@ export class AgentWebSocket {
   }
 
   sendResponse(response: CommandResponse): void {
-    if (!this.isConnected || !this.ws) return;
-
-    try {
-      this.ws.send(JSON.stringify(response));
-    } catch (err) {
-      log.error(`Response send failed: ${(err as Error).message}`);
-    }
+    this.sendCritical(JSON.stringify(response), "response");
   }
 
   sendProgress(progress: CommandProgress): void {
-    if (!this.isConnected || !this.ws) return;
-
-    try {
-      this.ws.send(JSON.stringify(progress));
-    } catch (err) {
-      log.error(`Progress send failed: ${(err as Error).message}`);
-    }
+    this.sendCritical(JSON.stringify(progress), "progress");
   }
 
   close(): void {
@@ -147,9 +152,88 @@ export class AgentWebSocket {
     this.stopHeartbeat();
     this.stopSendStats();
     this.stopSilenceTimer();
+    this.stopDrain();
     if (this.ws) {
       this.ws.close(1000, "Agent shutting down");
       this.ws = null;
+    }
+  }
+
+  private sendCritical(payload: string, kind: "response" | "progress"): void {
+    if (this.isConnected && this.ws) {
+      try {
+        this.ws.send(payload, (err) => {
+          if (err) {
+            log.warn(`${kind} send callback error: ${err.message}. Queueing.`);
+            this.enqueuePending({ payload, kind, enqueuedAt: Date.now() });
+          }
+        });
+        return;
+      } catch (err) {
+        log.warn(`${kind} send exception: ${(err as Error).message}. Queueing.`);
+      }
+    }
+    this.enqueuePending({ payload, kind, enqueuedAt: Date.now() });
+  }
+
+  private enqueuePending(msg: PendingMessage): void {
+    const now = Date.now();
+    while (
+      this.pendingQueue.length > 0 &&
+      now - this.pendingQueue[0].enqueuedAt > MAX_PENDING_AGE_MS
+    ) {
+      this.pendingQueue.shift();
+    }
+    if (this.pendingQueue.length >= MAX_PENDING_QUEUE) {
+      this.pendingQueue.shift();
+      log.warn(`Pending queue full (${MAX_PENDING_QUEUE}). Dropped oldest.`);
+    }
+    this.pendingQueue.push(msg);
+    log.info(`Queued ${msg.kind} (pending=${this.pendingQueue.length}).`);
+  }
+
+  private scheduleDrain(): void {
+    if (this.drainTimer) return;
+    this.drainTimer = setTimeout(() => this.drainOne(), 0);
+  }
+
+  private drainOne(): void {
+    this.drainTimer = null;
+    if (!this.isConnected || !this.ws) return;
+
+    const msg = this.pendingQueue.shift();
+    if (!msg) return;
+
+    if (Date.now() - msg.enqueuedAt > MAX_PENDING_AGE_MS) {
+      log.warn(`Dropping expired ${msg.kind} from queue.`);
+      this.drainTimer = setTimeout(() => this.drainOne(), 0);
+      return;
+    }
+
+    try {
+      this.ws.send(msg.payload, (err) => {
+        if (err) {
+          log.error(`Drain ${msg.kind} send failed: ${err.message}. Requeueing.`);
+          this.pendingQueue.unshift(msg);
+        }
+      });
+    } catch (err) {
+      log.error(`Drain ${msg.kind} exception: ${(err as Error).message}. Requeueing.`);
+      this.pendingQueue.unshift(msg);
+      return;
+    }
+
+    if (this.pendingQueue.length > 0) {
+      this.drainTimer = setTimeout(() => this.drainOne(), DRAIN_INTERVAL_MS);
+    } else {
+      log.info("Pending queue drained.");
+    }
+  }
+
+  private stopDrain(): void {
+    if (this.drainTimer) {
+      clearTimeout(this.drainTimer);
+      this.drainTimer = null;
     }
   }
 
