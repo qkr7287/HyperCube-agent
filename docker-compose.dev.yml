@@ -1,0 +1,22 @@
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: hypercube-agent-dev-${HOSTNAME_SUFFIX:?HOSTNAME_SUFFIX is required}
+    restart: unless-stopped
+    env_file: .env.dev
+    privileged: true
+    pid: host
+    volumes:
+      - .:/app
+      - agent_node_modules:/app/node_modules
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc:/host/proc:ro
+      - /var/run/utmp:/var/run/utmp:ro
+      - /etc/hostname:/host/etc/hostname:ro
+    group_add:
+      - "${DOCKER_GID:-999}"
+
+volumes:
+  agent_node_modules:
