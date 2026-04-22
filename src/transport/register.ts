@@ -1,4 +1,3 @@
-import os from "node:os";
 import { createLogger } from "../logger.js";
 import type { AppConfig, AgentRegistration } from "../types/index.js";
 
@@ -9,9 +8,11 @@ export async function registerAgent(
   config: AppConfig,
 ): Promise<AgentRegistration> {
   const url = `${config.backendApiUrl}/api/agents/`;
+  // Intentionally omit ip_address: a container-side os.networkInterfaces()
+  // returns the docker bridge IP, which is meaningless to the backend.
+  // Backend uses the TCP peer address instead.
   const body = {
     hostname: config.agentHostname,
-    ip_address: getLocalIp(),
   };
 
   while (true) {
@@ -51,19 +52,6 @@ export async function registerAgent(
       await sleep(REGISTER_RETRY_INTERVAL);
     }
   }
-}
-
-function getLocalIp(): string {
-  const interfaces = os.networkInterfaces();
-  for (const ifaceList of Object.values(interfaces)) {
-    if (!ifaceList) continue;
-    for (const iface of ifaceList) {
-      if (!iface.internal && iface.family === "IPv4") {
-        return iface.address;
-      }
-    }
-  }
-  return "127.0.0.1";
 }
 
 function sleep(ms: number): Promise<void> {
