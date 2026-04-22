@@ -60,7 +60,7 @@ if ! ssh "$SSH_ALIAS" "[ -f $REMOTE_DIR/.env.dev ]"; then
 fi
 
 echo ">>> [$TARGET] starting dev compose"
-ssh "$SSH_ALIAS" "cd $REMOTE_DIR && docker compose -p hypercube-agent-dev -f docker-compose.dev.yml up -d --build"
+ssh "$SSH_ALIAS" "cd $REMOTE_DIR && docker compose -p hypercube-agent-dev --env-file .env.dev -f docker-compose.dev.yml up -d --build"
 
 echo
 echo "agent-$TARGET is up. tail logs with:"

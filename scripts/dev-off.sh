@@ -16,7 +16,7 @@ esac
 SESSION_NAME="agent-$TARGET"
 
 echo ">>> [$TARGET] stopping dev compose"
-ssh "$SSH_ALIAS" "cd $REMOTE_DIR && docker compose -p hypercube-agent-dev -f docker-compose.dev.yml down" || true
+ssh "$SSH_ALIAS" "cd $REMOTE_DIR && docker compose -p hypercube-agent-dev --env-file .env.dev -f docker-compose.dev.yml down" || true
 
 if [ "$MODE" = "--terminate" ]; then
   echo ">>> [$TARGET] terminating Mutagen session '$SESSION_NAME'"
