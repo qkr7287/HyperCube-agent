@@ -17,6 +17,15 @@ export function loadConfig(): AppConfig {
     agentHostname: process.env.AGENT_HOSTNAME || readHostHostname() || os.hostname(),
     collectInterval,
     dockerSocket: process.env.DOCKER_SOCKET ?? "/var/run/docker.sock",
+    // Optional override sent in registration payload as ip_address. Only
+    // useful in environments where the backend cannot infer the agent's
+    // real IP from the TCP peer address (Docker Desktop on Windows/Mac,
+    // VPN, NAT). Empty/unset = omit the field and let the backend record
+    // whatever it observes.
+    advertiseIp:
+      process.env.AGENT_ADVERTISE_IP?.trim() ||
+      process.env.HOST_IP?.trim() ||
+      null,
   };
 }
 

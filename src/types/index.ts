@@ -6,6 +6,7 @@ export interface AppConfig {
   agentHostname: string;
   collectInterval: number;
   dockerSocket: string;
+  advertiseIp: string | null;
 }
 
 // --- System Metrics ---

@@ -8,12 +8,20 @@ export async function registerAgent(
   config: AppConfig,
 ): Promise<AgentRegistration> {
   const url = `${config.backendApiUrl}/api/agents/`;
-  // Intentionally omit ip_address: a container-side os.networkInterfaces()
-  // returns the docker bridge IP, which is meaningless to the backend.
-  // Backend uses the TCP peer address instead.
-  const body = {
+  // ip_address policy:
+  //   - bridge mode: os.networkInterfaces() returns docker-internal IPs,
+  //     so we never trust them.
+  //   - Linux host network mode: host NICs are visible, but the backend's
+  //     TCP peer address is already accurate enough — no need to send.
+  //   - Docker Desktop (Windows/Mac), VPN, special NAT: backend can't
+  //     infer the real IP. Set AGENT_ADVERTISE_IP (or HOST_IP) to override.
+  // Default: omit the field and let the backend record observed peer IP.
+  const body: { hostname: string; ip_address?: string } = {
     hostname: config.agentHostname,
   };
+  if (config.advertiseIp) {
+    body.ip_address = config.advertiseIp;
+  }
 
   while (true) {
     try {
