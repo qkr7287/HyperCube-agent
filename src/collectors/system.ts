@@ -2,10 +2,11 @@ import si from "systeminformation";
 import os from "node:os";
 import { readLoggedInUsers } from "../utils/utmp.js";
 import { getCpuTopology } from "../utils/cpu-topology.js";
+import { collectGpuMetrics } from "../utils/gpu-topology.js";
 import type { SystemMetrics } from "../types/index.js";
 
 export async function collectSystemMetrics(hostname: string): Promise<SystemMetrics> {
-  const [load, cpu, mem, disk, netIfaces, netStats, netConns, dockerInfo, procs, logins] =
+  const [load, cpu, mem, disk, netIfaces, netStats, netConns, dockerInfo, procs, logins, gpu] =
     await Promise.all([
       si.currentLoad(),
       si.cpu(),
@@ -17,6 +18,7 @@ export async function collectSystemMetrics(hostname: string): Promise<SystemMetr
       si.dockerInfo().catch(() => null),
       si.processes().catch(() => ({ all: 0, running: 0 })),
       readLoggedInUsers().catch(() => []),
+      collectGpuMetrics().catch(() => []),
     ]);
 
   const topology = await getCpuTopology(load.cpus.length);
@@ -82,6 +84,7 @@ export async function collectSystemMetrics(hostname: string): Promise<SystemMetr
       total: logins.length,
       active: logins.length,
     },
+    gpu,
   };
 }
 

@@ -60,6 +60,16 @@ export interface LoginsSummary {
   active: number;
 }
 
+export interface GpuMetric {
+  index: number;
+  vendor: string;
+  model: string;
+  memoryTotal: number;
+  memoryUsed: number;
+  usage: number;
+  temperature?: number;
+}
+
 export interface SystemMetrics {
   hostname: string;
   os: string;
@@ -71,6 +81,7 @@ export interface SystemMetrics {
   docker: DockerSummary;
   processes: ProcessesSummary;
   logins: LoginsSummary;
+  gpu: GpuMetric[];
 }
 
 // --- Container ---
