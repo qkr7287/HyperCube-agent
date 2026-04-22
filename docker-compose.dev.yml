@@ -16,6 +16,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /proc:/host/proc:ro
       - /var/run/utmp:/var/run/utmp:ro
+      - /var/log/wtmp:/host/var/log/wtmp:ro
       - /etc/hostname:/host/etc/hostname:ro
     group_add:
       - "${DOCKER_GID:-999}"

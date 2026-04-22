@@ -12,8 +12,13 @@ export interface AppConfig {
 // --- System Metrics ---
 
 export interface CpuInfo {
-  cores: number;
   model: string;
+  sockets: number;
+  cores: number;
+  threads: number;
+  isHybrid: boolean;
+  performanceCores: number;
+  efficiencyCores: number;
   usage: number;
   perCore: number[];
 }
@@ -195,7 +200,8 @@ export type SystemInfoSubCommand =
   | "cpu_detail"
   | "processes"
   | "network_detail"
-  | "users";
+  | "users"
+  | "users_history";
 
 // --- Agent Registration ---
 

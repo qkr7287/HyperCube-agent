@@ -1,6 +1,7 @@
 import si from "systeminformation";
 import os from "node:os";
 import { readLoggedInUsers } from "../utils/utmp.js";
+import { getCpuTopology } from "../utils/cpu-topology.js";
 import type { SystemMetrics } from "../types/index.js";
 
 export async function collectSystemMetrics(hostname: string): Promise<SystemMetrics> {
@@ -18,6 +19,11 @@ export async function collectSystemMetrics(hostname: string): Promise<SystemMetr
       readLoggedInUsers().catch(() => []),
     ]);
 
+  const topology = await getCpuTopology(load.cpus.length);
+  const modelBase = `${cpu.manufacturer} ${cpu.brand}`.trim();
+  const cpuModel =
+    topology.sockets > 1 ? `${modelBase} × ${topology.sockets}` : modelBase;
+
   const rootDisk = disk.find((d) => d.mount === "/" || d.mount === "C:\\") ?? disk[0];
 
   const ifaceNames = Array.isArray(netIfaces)
@@ -31,8 +37,13 @@ export async function collectSystemMetrics(hostname: string): Promise<SystemMetr
     os: `${os.type()} ${os.release()}`,
     uptime: os.uptime(),
     cpu: {
-      cores: load.cpus.length,
-      model: cpu.manufacturer + " " + cpu.brand,
+      model: cpuModel,
+      sockets: topology.sockets,
+      cores: topology.cores,
+      threads: topology.threads,
+      isHybrid: topology.isHybrid,
+      performanceCores: topology.performanceCores,
+      efficiencyCores: topology.efficiencyCores,
       usage: round(load.currentLoad),
       perCore: load.cpus.map((c) => round(c.load)),
     },
