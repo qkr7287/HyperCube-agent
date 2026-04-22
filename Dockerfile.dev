@@ -1,0 +1,14 @@
+FROM node:20-alpine
+
+RUN apk add --no-cache docker-cli docker-cli-compose
+
+# tsx for TypeScript hot-reload. Installed globally so we don't pollute
+# project package.json devDependencies (prod Dockerfile stays unchanged).
+RUN npm install -g tsx@4
+
+WORKDIR /app
+
+# Source is mounted at runtime. node_modules is a named volume (see
+# docker-compose.dev.yml) so host's missing node_modules doesn't mask
+# container's installed deps.
+CMD ["sh", "-c", "if [ ! -f node_modules/.installed ]; then npm install --no-audit --no-fund && touch node_modules/.installed; fi; exec tsx watch src/index.ts"]
