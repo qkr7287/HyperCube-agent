@@ -13,7 +13,11 @@ export async function collectSystemMetrics(hostname: string): Promise<SystemMetr
       si.mem(),
       si.fsSize(),
       si.networkInterfaces("default"),
-      si.networkStats("default"),
+      // systeminformation v5: networkStats() does NOT treat "default" as a
+      // magic string (unlike networkInterfaces). Passing "default" literally
+      // looks up an iface named "default", fails, and returns rx/tx = 0.
+      // Call with no args so the library resolves the default iface itself.
+      si.networkStats(),
       si.networkConnections(),
       si.dockerInfo().catch(() => null),
       si.processes().catch(() => ({ all: 0, running: 0 })),
