@@ -4,7 +4,9 @@ FROM node:20-bookworm-slim
 # nvidia-smi can execute inside the container. Alpine/musl silently
 # fails to exec glibc binaries.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates curl gnupg && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates curl gnupg \
+      pciutils iproute2 net-tools && \
     install -m 0755 -d /etc/apt/keyrings && \
     curl -fsSL https://download.docker.com/linux/debian/gpg \
       | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \

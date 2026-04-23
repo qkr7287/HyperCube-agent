@@ -16,6 +16,12 @@ let lastContainersFullSnapshotAt = 0;
 let lastContainerMetricsFullSnapshotAt = 0;
 const CONTAINERS_FULL_SNAPSHOT_INTERVAL_MS = 60_000;
 const CONTAINER_METRICS_FULL_SNAPSHOT_INTERVAL_MS = 60_000;
+// Hard ceiling per collection cycle. Sized to be 2-3x the worst-case cost
+// of dockerode stats over many containers (server 16 has ~72 containers
+// where collectAllContainerMetrics takes ~15s). The ceiling exists only as
+// a safety net against truly stuck calls (e.g. lspci hanging on a slim
+// image). A normally slow tick is still allowed to finish.
+const MAX_COLLECT_CYCLE_MS = 60_000;
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -82,11 +88,31 @@ async function main(): Promise<void> {
       return;
     }
     collecting = true;
-    collectAndSend(config, ws, deltaEngine, dockerCollector)
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(
+        () => reject(new Error(`cycle exceeded ${MAX_COLLECT_CYCLE_MS}ms`)),
+        MAX_COLLECT_CYCLE_MS,
+      );
+    });
+    Promise.race([
+      collectAndSend(config, ws, deltaEngine, dockerCollector),
+      timeoutPromise,
+    ])
       .catch((err) => {
-        log.error(`Collection error: ${(err as Error).message}`);
+        // Stuck cycle releases the lock so the next tick can run; the
+        // background promise may still resolve later but its result is
+        // ignored. This trades a possible memory leak under repeated hangs
+        // for liveness, which matters more for a heartbeat agent.
+        const msg = (err as Error).message;
+        if (msg.startsWith("cycle exceeded")) {
+          log.warn(`Collection ${msg} — abandoning to keep loop alive`);
+        } else {
+          log.error(`Collection error: ${msg}`);
+        }
       })
       .finally(() => {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
         collecting = false;
       });
   }, config.collectInterval);

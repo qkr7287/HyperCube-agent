@@ -11,6 +11,10 @@ const NVIDIA_SMI_ARGS = [
   "--format=csv,noheader,nounits",
 ];
 const NVIDIA_SMI_TIMEOUT_MS = 500;
+// systeminformation.graphics() shells out to lspci/lshw which may hang
+// indefinitely (or take seconds) when those binaries are missing or slow.
+// Race the entire fallback against the same 500ms ceiling as nvidia-smi.
+const GRAPHICS_FALLBACK_TIMEOUT_MS = 500;
 
 // Virtual / software display adapters that systeminformation reports
 // alongside real GPUs. Filtered out of the fallback output.
@@ -35,9 +39,16 @@ interface GpuTopologyEntry {
 }
 
 let cachedTopology: GpuTopologyEntry[] | null = null;
+// Once the systeminformation fallback returns (or times out), reuse its
+// result for the rest of the process lifetime. Fallback values are static
+// (memoryUsed/usage are 0, no temperature) so caching is safe — and it
+// stops repeatedly invoking lspci/lshw on slim images where every call
+// hangs until the cycle timeout fires.
+let cachedFallback: GpuMetric[] | null = null;
 
 export function clearGpuTopologyCacheForTests(): void {
   cachedTopology = null;
+  cachedFallback = null;
 }
 
 export async function collectGpuMetrics(): Promise<GpuMetric[]> {
@@ -129,6 +140,25 @@ function rememberTopology(rows: GpuMetric[]): void {
 }
 
 async function collectGraphicsFallback(): Promise<GpuMetric[]> {
+  if (cachedFallback !== null) return cachedFallback;
+
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<GpuMetric[]>((resolve) => {
+    timeoutHandle = setTimeout(() => {
+      log.debug(`graphics fallback timed out after ${GRAPHICS_FALLBACK_TIMEOUT_MS}ms`);
+      resolve([]);
+    }, GRAPHICS_FALLBACK_TIMEOUT_MS);
+  });
+  try {
+    const result = await Promise.race([runGraphicsFallback(), timeoutPromise]);
+    cachedFallback = result;
+    return result;
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+}
+
+async function runGraphicsFallback(): Promise<GpuMetric[]> {
   try {
     const mod = (await import("systeminformation")) as unknown as {
       default?: { graphics: () => Promise<{ controllers?: unknown[] }> };
