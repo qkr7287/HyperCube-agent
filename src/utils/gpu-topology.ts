@@ -46,18 +46,47 @@ let cachedTopology: GpuTopologyEntry[] | null = null;
 // hangs until the cycle timeout fires.
 let cachedFallback: GpuMetric[] | null = null;
 
+// Process-lifetime probe state. The fallback path (systeminformation +
+// lspci) is only needed on hosts that actually have NVIDIA hardware that
+// nvidia-smi can't speak to, which is rare. Most hosts fall into:
+//   - "nvidia": nvidia-smi works, call it every tick.
+//   - "fallback": no nvidia-smi but systeminformation saw a GPU once
+//     (e.g. iGPU). Return the cached value every tick thereafter, never
+//     re-run nvidia-smi or the fallback.
+//   - "none": neither path found anything. Short-circuit to [] forever.
+type GpuProbe = "unknown" | "nvidia" | "fallback" | "none";
+let probeState: GpuProbe = "unknown";
+
 export function clearGpuTopologyCacheForTests(): void {
   cachedTopology = null;
   cachedFallback = null;
+  probeState = "unknown";
 }
 
 export async function collectGpuMetrics(): Promise<GpuMetric[]> {
+  // Fast paths: once we've classified the host, never re-probe.
+  if (probeState === "none") return [];
+  if (probeState === "fallback") return cachedFallback ?? [];
+
+  // probeState is "unknown" or "nvidia"
   const nvidia = await collectNvidia();
   if (nvidia.length > 0) {
+    probeState = "nvidia";
     rememberTopology(nvidia);
     return nvidia;
   }
-  return collectGraphicsFallback();
+
+  if (probeState === "nvidia") {
+    // Host previously had a working nvidia-smi. A transient failure
+    // shouldn't serve stale cached numbers or trip us into the
+    // fallback — just skip this tick.
+    return [];
+  }
+
+  // First probe on this host: try fallback once, then commit.
+  const fallback = await collectGraphicsFallback();
+  probeState = fallback.length === 0 ? "none" : "fallback";
+  return fallback;
 }
 
 async function collectNvidia(): Promise<GpuMetric[]> {
