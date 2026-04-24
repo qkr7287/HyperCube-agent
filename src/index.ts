@@ -223,6 +223,15 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("unhandledRejection", (err) => {
   log.error(`Unhandled rejection: ${err}`);
 });
+// Without this handler, a synchronous throw in a timer/event callback kills
+// the process under Node's default policy but the stack trace can get lost
+// if stderr isn't flushed. Log explicitly, then exit so the container's
+// restart policy (or dev-supervisor) can recover instead of us running on
+// potentially corrupted state.
+process.on("uncaughtException", (err) => {
+  log.error(`Uncaught exception: ${(err as Error).stack ?? err}`);
+  process.exit(1);
+});
 
 // --- Start ---
 

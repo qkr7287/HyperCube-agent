@@ -26,4 +26,8 @@ WORKDIR /app
 # Source is mounted at runtime. node_modules is a named volume (see
 # docker-compose.dev.yml) so host's missing node_modules doesn't mask
 # container's installed deps.
-CMD ["sh", "-c", "if [ ! -f node_modules/.installed ]; then npm install --no-audit --no-fund && touch node_modules/.installed; fi; exec tsx watch src/index.ts"]
+#
+# dev-supervisor.sh owns the tsx lifecycle: it exits non-zero when tsx
+# watch loses its node child, so `restart: unless-stopped` can recover
+# the container instead of silently sitting on a dead child.
+CMD ["sh", "scripts/dev-supervisor.sh"]
