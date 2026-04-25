@@ -117,12 +117,31 @@ export class DockerCollector {
   ): Promise<ContainerMetrics | null> {
     const containerId = containerInfo.id;
     const container = this.docker.getContainer(containerId);
-    const stats = await Promise.race([
-      container.stats({ stream: false }),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`stats timeout for ${containerId}`)), STATS_TIMEOUT),
-      ),
-    ]);
+
+    // AbortController over Promise.race: when the timer fires we actually
+    // cancel the dockerode HTTP request (closes the socket) instead of
+    // letting the original promise leak in the background. Race-with-timeout
+    // accumulates orphan promises + sockets and was the proximate cause of
+    // V8 heap exhaustion + silent agent crashes.
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), STATS_TIMEOUT);
+    let stats: unknown;
+    try {
+      // dockerode runtime supports abortSignal but @types/dockerode omits it
+      // from the stats() options; cast through a typed alias.
+      const opts = {
+        stream: false,
+        abortSignal: ac.signal,
+      } as unknown as { stream?: false; "one-shot"?: boolean };
+      stats = await container.stats(opts);
+    } catch (err) {
+      if (ac.signal.aborted) {
+        throw new Error(`stats timeout for ${containerId}`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
 
     const s = stats as any; // eslint-disable-line @typescript-eslint/no-explicit-any
     const cpuUsage = calculateCpuPercent(s);

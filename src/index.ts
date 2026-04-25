@@ -23,9 +23,22 @@ const CONTAINER_METRICS_FULL_SNAPSHOT_INTERVAL_MS = 60_000;
 // image). A normally slow tick is still allowed to finish.
 const MAX_COLLECT_CYCLE_MS = 60_000;
 
+const HEAP_LOG_INTERVAL_MS = 60_000;
+
+function startHeapWatch(): void {
+  setInterval(() => {
+    const m = process.memoryUsage();
+    const heapMb = (m.heapUsed / 1_048_576).toFixed(0);
+    const rssMb = (m.rss / 1_048_576).toFixed(0);
+    const heapTotalMb = (m.heapTotal / 1_048_576).toFixed(0);
+    log.info(`mem heap=${heapMb}/${heapTotalMb}MB rss=${rssMb}MB`);
+  }, HEAP_LOG_INTERVAL_MS).unref();
+}
+
 async function main(): Promise<void> {
   const config = loadConfig();
   log.info(`Starting HyperCube Agent (${config.agentHostname})`);
+  startHeapWatch();
 
   // initialize docker client
   const dockerCollector = new DockerCollector(config.dockerSocket);
@@ -82,10 +95,20 @@ async function main(): Promise<void> {
 
   // start collection loop regardless of initial snapshot result
   log.info(`Collecting every ${config.collectInterval}ms`);
+  let consecutiveSkips = 0;
   collectTimer = setInterval(() => {
     if (collecting) {
-      log.debug("Previous collection still running. Skipping cycle.");
+      consecutiveSkips++;
+      // Log first skip and then every 30th (~once a minute at 2s interval)
+      // to avoid drowning the docker log driver in noise during slow cycles.
+      if (consecutiveSkips === 1 || consecutiveSkips % 30 === 0) {
+        log.debug(`Previous collection still running. Skipping (${consecutiveSkips} consecutive).`);
+      }
       return;
+    }
+    if (consecutiveSkips > 0) {
+      log.info(`Cycle resumed after ${consecutiveSkips} skipped tick(s).`);
+      consecutiveSkips = 0;
     }
     collecting = true;
     let timeoutHandle: ReturnType<typeof setTimeout> | null = null;

@@ -16,6 +16,24 @@ set -u
 CHECK_INTERVAL=${DEV_SUPERVISOR_INTERVAL:-10}
 MAX_MISSES=${DEV_SUPERVISOR_MAX_MISSES:-3}
 STARTUP_GRACE=${DEV_SUPERVISOR_STARTUP_GRACE:-20}
+TERM_GRACE=${DEV_SUPERVISOR_TERM_GRACE:-5}
+
+# Force-kill tsx if it doesn't honor SIGTERM within TERM_GRACE seconds.
+# Without this fallback the supervisor's `wait` blocks forever, the container
+# stays "Up" with no agent inside, and `restart: unless-stopped` never fires.
+shutdown_tsx() {
+    kill -TERM "$TSX_PID" 2>/dev/null
+    i=0
+    while kill -0 "$TSX_PID" 2>/dev/null && [ $i -lt $TERM_GRACE ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    if kill -0 "$TSX_PID" 2>/dev/null; then
+        echo "[dev-supervisor] tsx ignored SIGTERM after ${TERM_GRACE}s — sending SIGKILL"
+        kill -KILL "$TSX_PID" 2>/dev/null
+        sleep 1
+    fi
+}
 
 if [ ! -f node_modules/.installed ]; then
     npm install --no-audit --no-fund && touch node_modules/.installed
@@ -24,7 +42,7 @@ fi
 tsx watch src/index.ts &
 TSX_PID=$!
 
-trap 'kill -TERM "$TSX_PID" 2>/dev/null; wait "$TSX_PID" 2>/dev/null; exit 0' TERM INT
+trap 'shutdown_tsx; exit 0' TERM INT
 
 sleep "$STARTUP_GRACE"
 
@@ -37,8 +55,7 @@ while kill -0 "$TSX_PID" 2>/dev/null; do
         echo "[dev-supervisor] tsx has no node child (miss $misses/$MAX_MISSES)"
         if [ "$misses" -ge "$MAX_MISSES" ]; then
             echo "[dev-supervisor] child gone — exiting so docker restarts the container"
-            kill -TERM "$TSX_PID" 2>/dev/null
-            wait "$TSX_PID" 2>/dev/null
+            shutdown_tsx
             exit 1
         fi
     fi
