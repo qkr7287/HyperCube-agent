@@ -11,6 +11,8 @@ export function loadConfig(): AppConfig {
     throw new Error("COLLECT_INTERVAL must be a number >= 500");
   }
 
+  const dcgmRaw = process.env.DCGM_EXPORTER_URL?.trim();
+
   return {
     backendUrl,
     backendApiUrl,
@@ -26,6 +28,17 @@ export function loadConfig(): AppConfig {
       process.env.AGENT_ADVERTISE_IP?.trim() ||
       process.env.HOST_IP?.trim() ||
       null,
+    // When the agent runs in a container the host's /proc must be mounted
+    // (e.g. /proc:/host/proc:ro) so cgroup files can map PIDs back to
+    // containers. Native installs leave this at /proc.
+    hostProcPath: process.env.HOST_PROC_PATH?.trim() || "/proc",
+    // Optional dcgm-exporter scrape URL (Prometheus text format). When set
+    // and reachable, the agent prefers DCGM SM_ACTIVE for host GPU and uses
+    // MIG-instance metrics for containers attached 1:1 to a MIG slice.
+    // Unset/empty = pmon-only path.
+    dcgmExporterUrl: dcgmRaw && dcgmRaw.length > 0 ? dcgmRaw : null,
+    gpuPerContainerEnabled:
+      (process.env.GPU_PER_CONTAINER_ENABLED ?? "true").toLowerCase() !== "false",
   };
 }
 

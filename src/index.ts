@@ -2,6 +2,7 @@ import { loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { collectSystemMetrics } from "./collectors/system.js";
 import { DockerCollector } from "./collectors/docker.js";
+import { collectGpuPerContainer } from "./collectors/gpu-per-container.js";
 import { DeltaEngine } from "./sync/delta.js";
 import { dispatchCommand } from "./handlers/index.js";
 import { registerAgent } from "./transport/register.js";
@@ -153,7 +154,7 @@ async function collectAndSend(
 
   // collect system metrics
   try {
-    const system = await collectSystemMetrics(config.agentHostname);
+    const system = await collectSystemMetrics(config.agentHostname, config.dcgmExporterUrl);
     const systemDelta = deltaEngine.computeSystemDelta(system);
     if (systemDelta) {
       ws.send({
@@ -190,7 +191,13 @@ async function collectAndSend(
     }
 
     // collect container metrics (only for running containers)
-    const metrics = await dockerCollector.collectAllContainerMetrics(containers);
+    const runningContainers = containers.filter((c) => c.state === "running");
+    const gpuMap = await collectGpuPerContainer(
+      config,
+      dockerCollector.getDocker(),
+      runningContainers,
+    );
+    const metrics = await dockerCollector.collectAllContainerMetrics(containers, gpuMap);
     const metricsDelta = deltaEngine.computeContainerMetricsDelta(metrics);
     if (metricsDelta) {
       for (const [, m] of Object.entries(metricsDelta)) {

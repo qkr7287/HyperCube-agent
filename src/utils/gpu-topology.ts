@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createLogger } from "../logger.js";
 import type { GpuMetric } from "../types/index.js";
+import { collectDcgmSnapshot } from "./gpu-dcgm.js";
 
 const execFileAsync = promisify(execFile);
 const log = createLogger("gpu");
@@ -63,7 +64,9 @@ export function clearGpuTopologyCacheForTests(): void {
   probeState = "unknown";
 }
 
-export async function collectGpuMetrics(): Promise<GpuMetric[]> {
+export async function collectGpuMetrics(
+  dcgmExporterUrl: string | null = null,
+): Promise<GpuMetric[]> {
   // Fast paths: once we've classified the host, never re-probe.
   if (probeState === "none") return [];
   if (probeState === "fallback") return cachedFallback ?? [];
@@ -73,6 +76,7 @@ export async function collectGpuMetrics(): Promise<GpuMetric[]> {
   if (nvidia.length > 0) {
     probeState = "nvidia";
     rememberTopology(nvidia);
+    if (dcgmExporterUrl) await augmentWithDcgm(nvidia, dcgmExporterUrl);
     return nvidia;
   }
 
@@ -87,6 +91,30 @@ export async function collectGpuMetrics(): Promise<GpuMetric[]> {
   const fallback = await collectGraphicsFallback();
   probeState = fallback.length === 0 ? "none" : "fallback";
   return fallback;
+}
+
+// Replace the nvidia-smi sampled `usage` with DCGM's SM_ACTIVE when the
+// exporter is reachable. SM_ACTIVE is a hardware counter, so it's strictly
+// more accurate than `--query-gpu=utilization.gpu` (which is itself a
+// 1-second sampling estimate). Memory + temperature stay from nvidia-smi
+// because DCGM's FB_USED rounding can lag the live driver reading.
+async function augmentWithDcgm(
+  metrics: GpuMetric[],
+  dcgmExporterUrl: string,
+): Promise<void> {
+  try {
+    const snapshot = await collectDcgmSnapshot(dcgmExporterUrl);
+    if (!snapshot) return;
+    const byIndex = new Map(snapshot.hostGpus.map((g) => [g.gpuIndex, g]));
+    for (const m of metrics) {
+      const dcgm = byIndex.get(m.index);
+      if (dcgm?.smActive !== null && dcgm?.smActive !== undefined) {
+        m.usage = dcgm.smActive;
+      }
+    }
+  } catch (err) {
+    log.debug(`dcgm augmentation skipped: ${(err as Error).message}`);
+  }
 }
 
 async function collectNvidia(): Promise<GpuMetric[]> {
