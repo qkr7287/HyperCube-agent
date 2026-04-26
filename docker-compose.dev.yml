@@ -6,16 +6,45 @@ services:
     container_name: hypercube-agent-dev-${HOSTNAME_SUFFIX:?HOSTNAME_SUFFIX is required}
     restart: unless-stopped
     env_file: .env.dev
+    # Default runc is safe everywhere. On GPU hosts (e.g. 63) set
+    # AGENT_RUNTIME=nvidia in .env.dev to enable host nvidia-smi injection.
+    runtime: ${AGENT_RUNTIME:-runc}
     # Host network mirrors prod compose. See docker-compose.yml for rationale.
     network_mode: host
     privileged: true
     pid: host
+    # nvidia-container-toolkit injects host's nvidia-smi + driver libs when
+    # these are present. Safe on non-GPU hosts — ignored unless the nvidia
+    # runtime is active. `utility` is the minimum capability for nvidia-smi;
+    # we don't need `compute` since we don't run CUDA code.
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: utility
+      # Cap V8 old-space at 512MB. With cgroup mem_limit below, leaks now
+      # surface as either a clean V8 OOM message or a cgroup OOM kill in
+      # dmesg, instead of the prior silent abort with lost stderr.
+      NODE_OPTIONS: "--max-old-space-size=512"
+    # cgroup ceiling at 768MB (V8 heap 512MB + headroom for native/RSS).
+    # Once memory.max is set, any growth past it produces an OOM kill
+    # recorded by the kernel (memory.events + dmesg), so silent deaths
+    # become diagnosable.
+    mem_limit: 768m
+    memswap_limit: 768m
+    # Cap json-file growth at 20MB x 10 = 200MB per container. Without this
+    # the log grows unbounded and either fills the disk or buries useful
+    # crash context under months of routine output.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "10"
     volumes:
       - .:/app
       - agent_node_modules:/app/node_modules
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /proc:/host/proc:ro
       - /var/run/utmp:/var/run/utmp:ro
+      - /var/log/wtmp:/host/var/log/wtmp:ro
       - /etc/hostname:/host/etc/hostname:ro
     group_add:
       - "${DOCKER_GID:-999}"

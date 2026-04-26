@@ -2,16 +2,19 @@ import si from "systeminformation";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import { createLogger } from "../logger.js";
-import { readLoggedInUsers } from "../utils/utmp.js";
+import { readLoggedInUsers, readWtmpSessions } from "../utils/utmp.js";
 import type { SystemInfoSubCommand } from "../types/index.js";
 
 const log = createLogger("handler:system-info");
 
 const VALID_SUB_COMMANDS = new Set<SystemInfoSubCommand>([
-  "cpu_detail", "processes", "network_detail", "users",
+  "cpu_detail", "processes", "network_detail", "users", "users_history",
 ]);
 
 const MAX_PROCESSES = 50;
+const WTMP_PATHS = ["/host/var/log/wtmp", "/var/log/wtmp"] as const;
+const USERS_HISTORY_DEFAULT_LIMIT = 100;
+const USERS_HISTORY_MAX_LIMIT = 500;
 
 export async function handleSystemInfo(
   params: Record<string, unknown>,
@@ -35,6 +38,8 @@ export async function handleSystemInfo(
       return await getNetworkDetail();
     case "users":
       return await getUsers();
+    case "users_history":
+      return await getUsersHistory(params.limit);
   }
 }
 
@@ -183,6 +188,59 @@ async function getUsers(): Promise<Record<string, unknown>> {
     log.warn(`utmp read failed: ${(err as Error).message}`);
     return { users: [] };
   }
+}
+
+async function getUsersHistory(
+  rawLimit: unknown,
+): Promise<Record<string, unknown>> {
+  const limit = clampLimit(rawLimit);
+
+  let readErr: NodeJS.ErrnoException | null = null;
+  for (const path of WTMP_PATHS) {
+    try {
+      const sessions = await readWtmpSessions(path);
+      const total = sessions.length;
+      const sliced = sessions.slice(0, limit).map((s) => ({
+        user: s.user,
+        terminal: s.terminal,
+        host: s.host,
+        startTime: s.startTime.toISOString(),
+        endTime: s.endTime ? s.endTime.toISOString() : null,
+        durationSeconds: s.durationSeconds,
+        active: s.active,
+        ...(s.endReason && s.endReason !== "logout" ? { endReason: s.endReason } : {}),
+      }));
+      return {
+        sessions: sliced,
+        totalSessions: total,
+        truncated: total > limit,
+        source: "wtmp",
+      };
+    } catch (err) {
+      readErr = err as NodeJS.ErrnoException;
+      if (readErr.code !== "ENOENT") break;
+    }
+  }
+
+  const reason =
+    readErr?.code === "ENOENT"
+      ? "wtmp not mounted"
+      : `wtmp read failed: ${readErr?.message ?? "unknown error"}`;
+  log.warn(`users_history unavailable: ${reason}`);
+  return {
+    sessions: [],
+    totalSessions: 0,
+    truncated: false,
+    source: "wtmp",
+    unavailable: true,
+    reason,
+  };
+}
+
+function clampLimit(raw: unknown): number {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return USERS_HISTORY_DEFAULT_LIMIT;
+  return Math.min(Math.floor(n), USERS_HISTORY_MAX_LIMIT);
 }
 
 function round(value: number): number {

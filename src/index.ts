@@ -2,6 +2,7 @@ import { loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { collectSystemMetrics } from "./collectors/system.js";
 import { DockerCollector } from "./collectors/docker.js";
+import { collectGpuPerContainer } from "./collectors/gpu-per-container.js";
 import { DeltaEngine } from "./sync/delta.js";
 import { dispatchCommand } from "./handlers/index.js";
 import { registerAgent } from "./transport/register.js";
@@ -16,10 +17,29 @@ let lastContainersFullSnapshotAt = 0;
 let lastContainerMetricsFullSnapshotAt = 0;
 const CONTAINERS_FULL_SNAPSHOT_INTERVAL_MS = 60_000;
 const CONTAINER_METRICS_FULL_SNAPSHOT_INTERVAL_MS = 60_000;
+// Hard ceiling per collection cycle. Sized to be 2-3x the worst-case cost
+// of dockerode stats over many containers (server 16 has ~72 containers
+// where collectAllContainerMetrics takes ~15s). The ceiling exists only as
+// a safety net against truly stuck calls (e.g. lspci hanging on a slim
+// image). A normally slow tick is still allowed to finish.
+const MAX_COLLECT_CYCLE_MS = 60_000;
+
+const HEAP_LOG_INTERVAL_MS = 60_000;
+
+function startHeapWatch(): void {
+  setInterval(() => {
+    const m = process.memoryUsage();
+    const heapMb = (m.heapUsed / 1_048_576).toFixed(0);
+    const rssMb = (m.rss / 1_048_576).toFixed(0);
+    const heapTotalMb = (m.heapTotal / 1_048_576).toFixed(0);
+    log.info(`mem heap=${heapMb}/${heapTotalMb}MB rss=${rssMb}MB`);
+  }, HEAP_LOG_INTERVAL_MS).unref();
+}
 
 async function main(): Promise<void> {
   const config = loadConfig();
   log.info(`Starting HyperCube Agent (${config.agentHostname})`);
+  startHeapWatch();
 
   // initialize docker client
   const dockerCollector = new DockerCollector(config.dockerSocket);
@@ -76,17 +96,47 @@ async function main(): Promise<void> {
 
   // start collection loop regardless of initial snapshot result
   log.info(`Collecting every ${config.collectInterval}ms`);
+  let consecutiveSkips = 0;
   collectTimer = setInterval(() => {
     if (collecting) {
-      log.debug("Previous collection still running. Skipping cycle.");
+      consecutiveSkips++;
+      // Log first skip and then every 30th (~once a minute at 2s interval)
+      // to avoid drowning the docker log driver in noise during slow cycles.
+      if (consecutiveSkips === 1 || consecutiveSkips % 30 === 0) {
+        log.debug(`Previous collection still running. Skipping (${consecutiveSkips} consecutive).`);
+      }
       return;
     }
+    if (consecutiveSkips > 0) {
+      log.info(`Cycle resumed after ${consecutiveSkips} skipped tick(s).`);
+      consecutiveSkips = 0;
+    }
     collecting = true;
-    collectAndSend(config, ws, deltaEngine, dockerCollector)
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(
+        () => reject(new Error(`cycle exceeded ${MAX_COLLECT_CYCLE_MS}ms`)),
+        MAX_COLLECT_CYCLE_MS,
+      );
+    });
+    Promise.race([
+      collectAndSend(config, ws, deltaEngine, dockerCollector),
+      timeoutPromise,
+    ])
       .catch((err) => {
-        log.error(`Collection error: ${(err as Error).message}`);
+        // Stuck cycle releases the lock so the next tick can run; the
+        // background promise may still resolve later but its result is
+        // ignored. This trades a possible memory leak under repeated hangs
+        // for liveness, which matters more for a heartbeat agent.
+        const msg = (err as Error).message;
+        if (msg.startsWith("cycle exceeded")) {
+          log.warn(`Collection ${msg} — abandoning to keep loop alive`);
+        } else {
+          log.error(`Collection error: ${msg}`);
+        }
       })
       .finally(() => {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
         collecting = false;
       });
   }, config.collectInterval);
@@ -104,7 +154,7 @@ async function collectAndSend(
 
   // collect system metrics
   try {
-    const system = await collectSystemMetrics(config.agentHostname);
+    const system = await collectSystemMetrics(config.agentHostname, config.dcgmExporterUrl);
     const systemDelta = deltaEngine.computeSystemDelta(system);
     if (systemDelta) {
       ws.send({
@@ -141,7 +191,13 @@ async function collectAndSend(
     }
 
     // collect container metrics (only for running containers)
-    const metrics = await dockerCollector.collectAllContainerMetrics(containers);
+    const runningContainers = containers.filter((c) => c.state === "running");
+    const gpuMap = await collectGpuPerContainer(
+      config,
+      dockerCollector.getDocker(),
+      runningContainers,
+    );
+    const metrics = await dockerCollector.collectAllContainerMetrics(containers, gpuMap);
     const metricsDelta = deltaEngine.computeContainerMetricsDelta(metrics);
     if (metricsDelta) {
       for (const [, m] of Object.entries(metricsDelta)) {
@@ -196,6 +252,15 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("unhandledRejection", (err) => {
   log.error(`Unhandled rejection: ${err}`);
+});
+// Without this handler, a synchronous throw in a timer/event callback kills
+// the process under Node's default policy but the stack trace can get lost
+// if stderr isn't flushed. Log explicitly, then exit so the container's
+// restart policy (or dev-supervisor) can recover instead of us running on
+// potentially corrupted state.
+process.on("uncaughtException", (err) => {
+  log.error(`Uncaught exception: ${(err as Error).stack ?? err}`);
+  process.exit(1);
 });
 
 // --- Start ---

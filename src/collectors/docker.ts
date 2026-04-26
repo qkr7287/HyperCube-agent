@@ -1,9 +1,12 @@
 import Dockerode from "dockerode";
+import os from "node:os";
 import { createLogger } from "../logger.js";
+import { resolveContainerCoresQuota } from "../utils/container-cpu-quota.js";
 import type {
   ContainerInfo,
   ContainerMetrics,
   ContainerNetworkStat,
+  GpuPerContainer,
   NetworkMappingMode,
 } from "../types/index.js";
 
@@ -17,6 +20,13 @@ export class DockerCollector {
   private available = false;
   private lastRetryAt = 0;
   private previousNetworkSamples = new Map<string, Map<string, NetworkSample>>();
+  // Cached per-container cores quota. Keyed by short container ID. Quota is
+  // immutable for the lifetime of a container ID (changing --cpus requires
+  // recreating the container, which yields a new ID), so a single inspect
+  // per container is sufficient. Entries are pruned when the container
+  // stops appearing in the running set.
+  private coresQuotaCache = new Map<string, number | null>();
+  private hostLogicalCores = os.cpus().length;
 
   constructor(socketPath: string) {
     this.docker = new Dockerode({ socketPath });
@@ -88,6 +98,7 @@ export class DockerCollector {
 
   async collectAllContainerMetrics(
     containers: ContainerInfo[],
+    gpuMap?: ReadonlyMap<string, GpuPerContainer>,
   ): Promise<Record<string, ContainerMetrics>> {
     if (!this.available) return {};
 
@@ -103,13 +114,36 @@ export class DockerCollector {
 
       for (const result of results) {
         if (result.status === "fulfilled" && result.value) {
-          metrics[result.value.containerId] = result.value;
+          const m = result.value;
+          const gpu = gpuMap?.get(m.containerId);
+          if (gpu) m.gpu = gpu;
+          metrics[m.containerId] = m;
         }
       }
     }
 
     this.pruneNetworkSamples(runningIds);
+    this.pruneCoresQuotaCache(runningIds);
     return metrics;
+  }
+
+  private async getCoresQuota(shortId: string): Promise<number | null> {
+    if (this.coresQuotaCache.has(shortId)) {
+      return this.coresQuotaCache.get(shortId) ?? null;
+    }
+    const quota = await resolveContainerCoresQuota(
+      this.docker,
+      shortId,
+      this.hostLogicalCores,
+    );
+    this.coresQuotaCache.set(shortId, quota);
+    return quota;
+  }
+
+  private pruneCoresQuotaCache(runningIds: ReadonlySet<string>): void {
+    for (const id of this.coresQuotaCache.keys()) {
+      if (!runningIds.has(id)) this.coresQuotaCache.delete(id);
+    }
   }
 
   private async collectSingleMetrics(
@@ -117,12 +151,31 @@ export class DockerCollector {
   ): Promise<ContainerMetrics | null> {
     const containerId = containerInfo.id;
     const container = this.docker.getContainer(containerId);
-    const stats = await Promise.race([
-      container.stats({ stream: false }),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`stats timeout for ${containerId}`)), STATS_TIMEOUT),
-      ),
-    ]);
+
+    // AbortController over Promise.race: when the timer fires we actually
+    // cancel the dockerode HTTP request (closes the socket) instead of
+    // letting the original promise leak in the background. Race-with-timeout
+    // accumulates orphan promises + sockets and was the proximate cause of
+    // V8 heap exhaustion + silent agent crashes.
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), STATS_TIMEOUT);
+    let stats: unknown;
+    try {
+      // dockerode runtime supports abortSignal but @types/dockerode omits it
+      // from the stats() options; cast through a typed alias.
+      const opts = {
+        stream: false,
+        abortSignal: ac.signal,
+      } as unknown as { stream?: false; "one-shot"?: boolean };
+      stats = await container.stats(opts);
+    } catch (err) {
+      if (ac.signal.aborted) {
+        throw new Error(`stats timeout for ${containerId}`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
 
     const s = stats as any; // eslint-disable-line @typescript-eslint/no-explicit-any
     const cpuUsage = calculateCpuPercent(s);
@@ -155,11 +208,22 @@ export class DockerCollector {
       if (e.op === "write" || e.op === "Write") diskWrite += e.value ?? 0;
     }
 
+    const coresQuota = await this.getCoresQuota(containerId);
+    const usagePct =
+      coresQuota && coresQuota > 0
+        ? clampPercent(cpuUsage / coresQuota)
+        : null;
+
     return {
       containerId,
+      name: containerInfo.name,
+      image: containerInfo.image,
+      state: containerInfo.state,
       cpu: {
         usage: round(cpuUsage),
         cores: s.cpu_stats?.online_cpus ?? 1,
+        usage_pct: usagePct,
+        cores_quota: coresQuota,
       },
       memory: {
         usage: memUsage,
@@ -257,6 +321,12 @@ function calculateCpuPercent(stats: any): number {
 }
 
 function round(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+function clampPercent(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  if (value >= 100) return 100;
   return Math.round(value * 10) / 10;
 }
 

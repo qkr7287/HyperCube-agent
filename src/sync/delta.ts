@@ -9,6 +9,11 @@ const MEMORY_THRESHOLD = 1;
 const DISK_THRESHOLD = 1;
 const CONTAINER_CPU_THRESHOLD = 2;
 const CONTAINER_NETWORK_RATE_THRESHOLD = 1;
+const CONTAINER_GPU_USAGE_THRESHOLD = 2;
+// Bytes (matches GpuPerContainer.memoryUsed units after the contract bump).
+// 1 MiB — small enough to catch real allocation moves, large enough to ignore
+// per-cycle jitter in the driver's reported counts.
+const CONTAINER_GPU_MEM_THRESHOLD = 1024 * 1024;
 
 export class DeltaEngine {
   private prevSystem: SystemMetrics | null = null;
@@ -116,7 +121,8 @@ export class DeltaEngine {
 
       if (
         Math.abs(prev.cpu.usage - metrics.cpu.usage) >= CONTAINER_CPU_THRESHOLD ||
-        hasContainerNetworkChanged(prev, metrics)
+        hasContainerNetworkChanged(prev, metrics) ||
+        hasContainerGpuChanged(prev, metrics)
       ) {
         changed[id] = metrics;
         hasChange = true;
@@ -181,4 +187,34 @@ function hasNullableRateChanged(prev: number | null, current: number | null): bo
   if (prev === current) return false;
   if (prev === null || current === null) return true;
   return Math.abs(prev - current) >= CONTAINER_NETWORK_RATE_THRESHOLD;
+}
+
+function hasContainerGpuChanged(
+  prev: ContainerMetrics,
+  current: ContainerMetrics,
+): boolean {
+  // Appearance/disappearance is always a change.
+  if (!prev.gpu && !current.gpu) return false;
+  if (!prev.gpu || !current.gpu) return true;
+
+  const a = prev.gpu;
+  const b = current.gpu;
+  if (a.source !== b.source) return true;
+  // null↔number transition is a real signal (driver started/stopped
+  // reporting, or a co-tenant joined and split usage attribution).
+  if ((a.usage === null) !== (b.usage === null)) return true;
+  if (
+    a.usage !== null &&
+    b.usage !== null &&
+    Math.abs(a.usage - b.usage) >= CONTAINER_GPU_USAGE_THRESHOLD
+  ) {
+    return true;
+  }
+  if (Math.abs(a.memoryUsed - b.memoryUsed) >= CONTAINER_GPU_MEM_THRESHOLD) return true;
+  if (a.memoryTotal !== b.memoryTotal) return true;
+  if (a.indices.length !== b.indices.length) return true;
+  for (let i = 0; i < a.indices.length; i += 1) {
+    if (a.indices[i] !== b.indices[i]) return true;
+  }
+  return false;
 }
