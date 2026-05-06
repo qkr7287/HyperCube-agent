@@ -1,34 +1,42 @@
 # Air-Gapped Installation Guide
 
-폐쇄망 서버에 HyperCube Agent를 설치하는 절차입니다. 인터넷이 안 되는 환경에서도 단일 파일(`.sh`)만 USB로 반입하면 끝납니다.
+폐쇄망 서버에 HyperCube Agent를 설치하는 절차입니다. 인터넷이 안 되는 환경에서도 단일 파일(`.sh`)만 USB로 반입하면 끝납니다. **Docker가 안 깔린 깡통 Ubuntu에서도 작동합니다** — 인스톨러가 자체 번들 .deb로 Docker도 같이 설치합니다.
 
 ## 0. 흐름 한눈에
 
 ```
-[외부망 빌드 PC]                  [USB]                [폐쇄망 서버]
+[외부망 빌드 PC]                     [USB]                [폐쇄망 서버]
   build-installer.sh
-   ├ docker build
-   ├ docker save        ──→  installer.sh  ──→  sudo ./installer.sh
-   └ self-extract 패킹            (84MB)         (인터랙티브 입력)
+   ├ docker build (Agent 이미지)
+   ├ fetch-docker-debs.sh    ──→  installer.sh   ──→  sudo ./installer.sh
+   │  (Docker .deb 다운)            (~169MB)            (인터랙티브 입력)
+   └ self-extract 패킹                                  ↓
+                                                Docker 자동 설치 (없으면)
+                                                       ↓
+                                                Agent 컨테이너 기동
 ```
 
 ## 1. 폐쇄망 서버 사전 조건
 
-설치 전에 폐쇄망 서버(예: Ubuntu 24.04 LTS)에 다음이 깔려 있어야 합니다.
+타겟이 **Ubuntu 24.04 LTS amd64**라면 다음만 있으면 됩니다.
 
 | 도구 | 확인 명령 | 비고 |
 |---|---|---|
-| `docker` | `docker --version` | Engine 24.0+ 권장 |
-| `docker compose` 플러그인 | `docker compose version` | v2 |
-| `bash` | `bash --version` | 5.x |
-| `tar` | `tar --version` | Docker가 의존하므로 사실상 보장 |
-| `systemd` | `systemctl --version` | 부팅 시 자동 시작 원할 때만 |
+| `bash` | `bash --version` | 5.x — Ubuntu 기본 |
+| `tar` | `tar --version` | Ubuntu 기본 (Essential 패키지) |
+| `dpkg` | `dpkg --version` | Debian 계열 기본 |
+| `systemd` | `systemctl --version` | Ubuntu 기본 (부팅 시 자동 시작용) |
 
-`docker` 자체가 폐쇄망에 없다면 § 5의 "Docker 오프라인 설치" 부록을 먼저 진행하세요.
+**없어도 인스톨러가 알아서 까는 것**:
+- Docker Engine
+- docker compose 플러그인
+- containerd, runc, buildx 등 Docker 의존 패키지
+
+**여전히 필요한 것** (Agent가 못 까는 영역):
+- GPU 모니터링 시: NVIDIA 드라이버 + `nvidia-container-toolkit` (호스트 사전 설치)
 
 권한:
 - `root` 또는 `sudo` 필요
-- GPU 모니터링이 목적이면 NVIDIA 드라이버 + `nvidia-container-toolkit`이 호스트에 사전 설치돼 있어야 합니다 (드라이버는 Agent가 설치할 수 없음).
 
 ## 2. 빌드 PC (외부망)에서 인스톨러 만들기
 
@@ -36,17 +44,34 @@
 git clone https://github.com/qkr7287/hypercube-agent.git
 cd hypercube-agent
 
-# 단일 파일 인스톨러 빌드
+# 단일 파일 인스톨러 빌드 (Docker 번들 포함)
 bash scripts/build-installer.sh
 
 # 산출물
 ls dist-installer/
-# → hypercube-agent-installer-1.0.0.sh   (~84MB)
+# → hypercube-agent-installer-1.0.0.sh   (~169MB)
 ```
 
 이 한 파일에 다음이 모두 들어 있습니다:
-- node:20-alpine 베이스 + Agent 코드 + node_modules + native bindings
-- 설치 로직(자기 압축 해제 + .env 생성 + systemd 등록)
+- Agent 이미지 (Agent 코드 + node_modules + native bindings + alpine 베이스)
+- Docker Engine + cli + containerd + compose 플러그인 + 전이 의존성 .deb
+- 설치 로직 (자기 압축 해제 + Docker 자동 설치 + .env 생성 + systemd 등록)
+
+### 빌드 옵션
+
+| 환경변수 | 효과 |
+|---|---|
+| `HC_BUNDLE_DOCKER=0 bash scripts/build-installer.sh` | Docker 번들 빠짐 → 약 84MB. 타겟에 Docker 사전 설치 전제. |
+| (기본) | Docker 번들 포함 → 약 169MB. 깡통 Ubuntu에서도 동작. |
+
+### Docker .deb만 따로 받기
+
+```bash
+bash scripts/fetch-docker-debs.sh
+# → dist-installer/docker-debs/*.deb (~86MB, 19개 파일)
+```
+
+build-installer.sh가 이 디렉터리에 캐시된 .deb를 자동으로 재사용합니다. 한 번 받아두면 다음 빌드는 재다운로드 없이 즉시 패킹.
 
 ## 3. USB로 반입
 
@@ -76,6 +101,23 @@ Proceed? [Y/n]:
 ```
 
 기본값(`[ ]` 안)은 Enter로 그대로 받습니다. `Backend REST API URL`은 WebSocket URL을 자동으로 http(s)로 변환해 추천값으로 표시합니다.
+
+Docker가 없으면 자동으로:
+1. 번들된 .deb를 `dpkg -i`로 설치
+2. `systemctl start docker` (또는 systemd 없으면 `dockerd` 직접 기동)
+3. Agent 이미지 로드 + 컨테이너 기동
+
+진행 로그 예시:
+
+```
+[*] Pre-flight checks...                      OK
+[*] Extracting bundled payload...             OK (169M)
+[*] Docker not found. Installing bundled .debs...  OK
+[*] Loading agent image into Docker...        OK
+[*] Writing /opt/hypercube-agent/...          OK
+[*] Starting agent...                         OK
+[OK] Install complete.
+```
 
 ### 비대화(스크립트/CI)
 
@@ -164,19 +206,24 @@ sudo systemctl is-enabled hypercube-agent   # → enabled
 ### 인스톨러 첫머리에서 즉시 실패
 
 ```
-[X] Missing required command: docker
+[X] Missing required command: tar
 ```
-→ Docker Engine을 먼저 설치하세요 (§ 부록).
+→ `apt-get install -y tar` (거의 발생 안 함 — Ubuntu 기본 포함)
 
 ```
-[X] Docker daemon is not reachable.
+[X] Missing required command: dpkg
+    Bundled .debs require Debian/Ubuntu (dpkg). For other distros, install Docker manually first.
 ```
-→ `sudo systemctl start docker`
+→ RHEL/Rocky 등 비-Debian 호스트에서 발생. `HC_BUNDLE_DOCKER=0`로 빌드된 슬림 인스톨러를 사용하고, Docker는 해당 배포판 방식으로 사전 설치하세요.
+
+### Docker .deb 설치 단계에서 실패
 
 ```
-[X] Docker Compose plugin not found.
+[X] dpkg failed to install bundled .debs after retries.
 ```
-→ Ubuntu: `sudo apt install -y docker-compose-plugin` (오프라인은 § 부록).
+→ 인스톨러가 `dpkg -i` 두 번 + `dpkg --configure -a`까지 시도하고도 실패한 경우. 배포판 또는 버전 불일치 가능성:
+1. 타겟이 진짜 Ubuntu 24.04 amd64인지 확인 (`. /etc/os-release && echo $VERSION_CODENAME` → `noble`)
+2. 빌드 시 `fetch-docker-debs.sh`가 같은 코드네임 기준으로 .deb를 받았는지 확인
 
 ### Agent가 Backend 연결 실패만 반복
 
@@ -205,65 +252,88 @@ sudo systemctl is-enabled hypercube-agent   # → enabled
 
 빌드 도중 인스톨러 파일이 손상됐거나, 텍스트 모드로 전송돼서 바이너리가 깨졌을 가능성. USB 복사 시 **반드시 바이너리 그대로** 옮기세요. 의심되면 빌드 PC에서 `sha256sum`을 비교하세요.
 
-## 부록 — Docker Engine 오프라인 설치 (Ubuntu 24.04)
+### Docker 데몬이 안 떠 있다는 에러
 
-폐쇄망 서버에 Docker가 없는 경우, 외부망에서 .deb 받아 USB로 옮깁니다.
+```
+[X] Docker daemon never came up. Last log:
+```
+→ 인스톨러가 `dockerd`를 띄우려 했지만 실패. 로그(`/tmp/hc-dockerd.log`)에서 원인 확인. 흔한 원인:
+- 컨테이너 환경에서 `--privileged` 없이 실행 → 베어메탈 호스트에선 발생 안 함
+- 기존에 다른 dockerd가 떠 있어서 socket 충돌 → `pkill dockerd` 후 재시도
 
-### 외부망 PC에서 .deb 다운
+## 부록 A — 비-Ubuntu 호스트에 수동 설치 (RHEL/Rocky 등)
+
+번들된 .deb는 Debian 계열 전용입니다. RHEL/Rocky/Alma에선:
+
+1. **빌드 PC에서**: `HC_BUNDLE_DOCKER=0 bash scripts/build-installer.sh` (84MB 슬림 인스톨러)
+2. **타겟에**: `dnf install -y` 등 배포판 방식으로 Docker 먼저 설치
+3. **설치**: 슬림 인스톨러 실행
+
+## 부록 B — NVIDIA Container Toolkit 오프라인 설치 (GPU 호스트만)
+
+GPU 모니터링이 필요한 호스트에서, 외부망 PC에서 .deb를 받아 USB로 옮깁니다.
 
 ```bash
-mkdir docker-debs && cd docker-debs
+# 외부망 PC
+mkdir nvidia-container-debs && cd nvidia-container-debs
 
-# Docker 공식 저장소 추가
-sudo install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-  https://download.docker.com/linux/ubuntu noble stable" \
-  | sudo tee /etc/apt/sources.list.d/docker.list
+# NVIDIA 저장소 등록
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
 sudo apt-get update
 
-# 패키지 + 의존성 다운로드만
-apt-get download \
-  docker-ce docker-ce-cli containerd.io \
-  docker-buildx-plugin docker-compose-plugin
-# 의존성까지 한 방에:
-#   apt-get install -y --download-only -o Dir::Cache::Archives="$(pwd)" \
-#     docker-ce docker-ce-cli containerd.io docker-compose-plugin
+# 다운로드만
+apt-get install -y --download-only --no-install-recommends \
+  -o Dir::Cache::Archives="$(pwd)" \
+  nvidia-container-toolkit
 ```
 
-### 폐쇄망 서버에서 설치
-
 ```bash
-cd docker-debs
+# 폐쇄망 서버
+cd nvidia-container-debs
 sudo dpkg -i ./*.deb
-sudo systemctl enable --now docker
-
-# 확인
-docker --version
-docker compose version
-```
-
-### NVIDIA Container Toolkit 오프라인 설치 (GPU 호스트만)
-
-GPU 모니터링이 필요한 호스트에서, 외부망 PC에서 `apt-get download nvidia-container-toolkit nvidia-container-runtime` 으로 .deb를 받아 동일 절차로 옮기고 `dpkg -i`. 그 다음:
-
-```bash
 sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 ```
 
-## 부록 — 인스톨러 동작 검증 (테스트 환경)
+## 부록 C — 인스톨러 동작 검증 (테스트 환경)
 
-배포 전에 인스톨러 자체를 폐쇄망 환경에서 시뮬레이션하려면:
+배포 전에 인스톨러를 안전하게 시뮬레이션하는 두 가지 테스트가 있습니다.
+
+### C-1. Docker 사전 설치 시나리오
 
 ```bash
-# 빌드 PC에서
 bash scripts/build-installer.sh
 bash installer/test/test-airgap.sh
 ```
 
-이 테스트는 `--network none`으로 격리된 docker-in-docker 컨테이너 안에서 인스톨러를 실제로 실행해, 인터넷 없이 정상 동작하는지를 끝까지 검증합니다.
+`--network none`으로 격리된 docker-in-docker 컨테이너 안에서 인스톨러를 실행합니다. Docker가 이미 깔린 환경 시뮬레이션.
+
+### C-2. 깡통 Ubuntu 24.04 시나리오 (전체 검증)
+
+```bash
+bash scripts/build-installer.sh
+bash installer/sandbox/up-bare.sh
+```
+
+Docker가 전혀 없는 Ubuntu 24.04 컨테이너에 SSH 가능 환경 + 인터넷 차단 (iptables) 으로 띄웁니다. 인스톨러가 .deb 자동 설치까지 끝까지 동작하는지 확인.
+
+```bash
+ssh root@localhost -p 2223      # password: hypercube
+
+# 안에서
+which docker                     # not installed
+ping -c 1 -W 2 google.com        # blocked
+sudo /root/hypercube-agent-installer-1.0.0.sh
+```
+
+종료:
+```bash
+docker rm -f hc-airgap-bare hc-airgap-sandbox hc-airgap-test
+```
 
 ## 참고
 
