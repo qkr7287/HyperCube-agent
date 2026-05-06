@@ -2,6 +2,263 @@
 
 폐쇄망 서버에 HyperCube Agent를 설치하는 절차입니다. 인터넷이 안 되는 환경에서도 단일 파일(`.sh`)만 USB로 반입하면 끝납니다. **Docker가 안 깔린 깡통 Ubuntu에서도 작동합니다** — 인스톨러가 자체 번들 .deb로 Docker도 같이 설치합니다.
 
+## 이 문서를 어디서부터 읽나요?
+
+- **처음 해보는 사람**: [§ 따라하기](#따라하기--처음부터-끝까지)부터. 명령어 그대로 복붙하면 끝납니다.
+- **이미 익숙한 사람**: [§ 0. 흐름 한눈에](#0-흐름-한눈에)부터 순서대로.
+- **문제 생긴 사람**: [§ 7. 트러블슈팅](#7-트러블슈팅) + [§ 8. 진단 번들](#8-진단-번들-한-방에-만들기).
+
+---
+
+## 따라하기 — 처음부터 끝까지
+
+Linux를 잘 몰라도 됩니다. **명령어를 그대로 복붙**하시면 됩니다. 각 명령어 아래 **"기대 출력"** 이 적혀 있으니 비슷하게 나오면 다음 단계로 넘어가세요. 다르면 [§ 7](#7-트러블슈팅)이나 [§ 8 진단 번들](#8-진단-번들-한-방에-만들기)을 보고 그 결과를 저(빌드 PC)에게 가져오세요.
+
+### A. 빌드 PC에서 — 인스톨러 만들기 (이미 끝났으면 건너뛰기)
+
+지금 이 가이드를 읽고 있는 PC가 **빌드 PC** (인터넷 가능)입니다. 이미 인스톨러가 만들어져 있으면 § B로 가세요. 없으면:
+
+```powershell
+# Windows PowerShell 또는 Git Bash에서
+cd "C:\Users\agics\Desktop\workspace\01. git\HyperCube-agent"
+git checkout main
+git pull
+bash scripts/build-installer.sh
+```
+
+기대 출력 마지막 줄:
+```
+[OK] Installer built: ...\dist-installer\hypercube-agent-installer-1.0.0.sh (169M)
+```
+
+확인:
+```powershell
+ls dist-installer/
+```
+→ `hypercube-agent-installer-1.0.0.sh` 라는 파일이 있어야 합니다.
+
+체크섬도 만들어 두세요 (USB로 옮긴 뒤 깨졌는지 확인용):
+```powershell
+cd dist-installer
+sha256sum hypercube-agent-installer-1.0.0.sh > hypercube-agent-installer-1.0.0.sh.sha256
+cat hypercube-agent-installer-1.0.0.sh.sha256
+```
+기대 출력 (해시값은 매번 다름):
+```
+abcd1234...ef9876  hypercube-agent-installer-1.0.0.sh
+```
+
+### B. USB에 파일 복사
+
+USB 메모리를 빌드 PC에 꽂으면 보통 `D:` 또는 `E:` 같은 드라이브로 잡힙니다. 거기에 파일 두 개를 그냥 끌어다 놓거나 PowerShell로:
+
+```powershell
+# 예: USB가 E: 드라이브로 잡힌 경우
+cp dist-installer\hypercube-agent-installer-1.0.0.sh E:\
+cp dist-installer\hypercube-agent-installer-1.0.0.sh.sha256 E:\
+cp docs\airgap-install.md E:\
+```
+
+USB 안 내용 확인:
+```powershell
+ls E:\
+```
+세 파일이 보여야 합니다:
+```
+hypercube-agent-installer-1.0.0.sh           169M
+hypercube-agent-installer-1.0.0.sh.sha256    64B
+airgap-install.md                            ~30KB
+```
+
+USB 안전 제거 후 폐쇄망 서버로 가져갑니다.
+
+### C. 폐쇄망 서버에 접속 — SSH
+
+폐쇄망 서버는 보통 모니터·키보드 없이 SSH로만 접속합니다. 다른 PC에서:
+
+```bash
+ssh root@<서버IP>
+# 또는 비-root 계정이면
+ssh <계정>@<서버IP>
+sudo -i        # root 권한으로 전환
+```
+
+| 만약 이런 게 보이면 | 이렇게 하세요 |
+|---|---|
+| `password:` | 서버 비밀번호 입력 (관리자에게 받은 것) |
+| `Host key verification failed` | `ssh-keygen -R <서버IP>` 후 다시 ssh |
+| `Permission denied (publickey)` | 관리자에게 `id_rsa.pub` 등록 요청 |
+| `Connection refused` | 서버 SSH 포트 다른 경우. `ssh -p 22022 ...` 처럼 포트 지정 |
+
+### D. USB를 폐쇄망 서버에 꽂고 마운트
+
+서버에 USB를 물리적으로 꽂은 후, SSH 세션에서:
+
+```bash
+# 1. USB 장치 이름 찾기
+lsblk
+```
+
+기대 출력 (예시):
+```
+NAME    MAJ:MIN RM   SIZE RO TYPE MOUNTPOINTS
+sda       8:0    0   500G  0 disk
+├─sda1    8:1    0   500M  0 part /boot/efi
+└─sda2    8:2    0 499.5G  0 part /
+sdb       8:16   1  14.9G  0 disk             ← 이게 USB
+└─sdb1    8:17   1  14.9G  0 part             ← USB의 파티션
+```
+
+`RM=1` (Removable), 본인이 꽂은 사이즈와 비슷한 디스크 = USB. 보통 `sdb1` 또는 `sdc1`. **본인 환경에서 다른 이름이 나올 수 있으니 위 출력 확인 필수.**
+
+```bash
+# 2. 마운트 디렉터리 만들고 마운트
+sudo mkdir -p /mnt/usb
+sudo mount /dev/sdb1 /mnt/usb     # ← sdb1을 본인이 본 이름으로 바꾸세요
+```
+
+기대 출력: 아무 메시지 없음 = 성공. (메시지 나오면 보통 에러)
+
+```bash
+# 3. 내용 확인
+ls -lh /mnt/usb/
+```
+
+기대 출력:
+```
+-rw-r--r-- 1 root root 169M ... hypercube-agent-installer-1.0.0.sh
+-rw-r--r-- 1 root root  64B ... hypercube-agent-installer-1.0.0.sh.sha256
+-rw-r--r-- 1 root root  30K ... airgap-install.md
+```
+
+### E. 무결성 검증 (USB 복사 중 안 깨졌나)
+
+```bash
+cd /mnt/usb
+sha256sum -c hypercube-agent-installer-1.0.0.sh.sha256
+```
+
+기대 출력:
+```
+hypercube-agent-installer-1.0.0.sh: OK
+```
+
+`OK` 안 나오면 USB 복사가 손상된 것 — 다시 복사하세요.
+
+### F. 인스톨러를 서버 디스크에 복사 + 실행 권한
+
+USB는 나중에 빼야 하니, 파일을 서버 본 디스크로 옮깁니다:
+
+```bash
+cp /mnt/usb/hypercube-agent-installer-1.0.0.sh /root/
+chmod +x /root/hypercube-agent-installer-1.0.0.sh
+ls -lh /root/hypercube-agent-installer-1.0.0.sh
+```
+
+기대 출력:
+```
+-rwxr-xr-x 1 root root 169M ... /root/hypercube-agent-installer-1.0.0.sh
+```
+앞에 `-rwxr-xr-x`처럼 `x`가 보이면 실행 가능 상태.
+
+### G. 인스톨러 실행
+
+```bash
+sudo /root/hypercube-agent-installer-1.0.0.sh
+```
+
+화면에 다음과 비슷한 출력이 나옵니다:
+
+```
+============================================================
+  HyperCube Agent installer  (version 1.0.0)
+============================================================
+[*] Pre-flight checks...
+[OK] Pre-flight passed.
+[*] Configuration
+
+  Backend WebSocket URL [ws://192.168.0.16:8000]: ▌
+```
+
+여기서 입력해야 할 것 (Enter만 치면 `[ ]` 안의 기본값 사용):
+
+| 묻는 것 | 무엇을 입력? |
+|---|---|
+| `Backend WebSocket URL` | HyperCube Backend 주소. 예: `ws://10.0.1.20:8000` |
+| `Backend REST API URL` | 위 ws://를 http://로만 바꾼 값. Enter로 자동값 사용 가능 |
+| `Agent hostname` | Enter (서버 호스트명 자동 사용). 또는 임의 이름 |
+| `Enable per-container GPU monitoring? (y/n)` | GPU 서버면 `y`, 아니면 `n` |
+| `Auto-start on boot via systemd? (y/n)` | `y` (재부팅 후 자동 시작) |
+| `Proceed? [Y/n]:` | Enter |
+
+그 후엔 자동 진행. 마지막에 이 줄이 보이면 성공:
+
+```
+[OK] Install complete.
+
+  Status : docker ps --filter name=hypercube-agent
+  Logs   : docker logs -f hypercube-agent
+  ...
+  Next: approve the agent in the HyperCube backend admin page.
+```
+
+### H. 정상 동작 확인
+
+```bash
+# 1. 컨테이너가 떠 있는지
+docker ps --filter name=hypercube-agent
+```
+
+기대 출력:
+```
+CONTAINER ID   IMAGE                   STATUS         NAMES
+xxxxxxx        hypercube-agent:1.0.0   Up 30 seconds  hypercube-agent
+```
+
+`Up xx seconds` 나오면 OK. `Exited` 나오면 § 7.5 참고.
+
+```bash
+# 2. 로그에 정상 메시지 보이는지 (5초 정도 보고 Ctrl+C로 빠져나오기)
+docker logs -f hypercube-agent
+```
+
+기대 출력 (몇 초 안에 이런 줄들이 보여야 함):
+```
+[INFO] [agent] Starting HyperCube Agent (...)
+[INFO] [docker] Docker connection established.
+[INFO] [register] Registering with backend...
+[INFO] [register] Registration accepted (status: pending)
+```
+
+빠져나올 때 `Ctrl+C` (나가도 컨테이너는 계속 실행됨).
+
+### I. Backend에서 승인
+
+신규 Agent는 **`pending` 상태로 등록**되어 있어서, Backend 관리자 페이지에서 **승인(Approve)** 해야 데이터가 전송됩니다.
+
+```
+HyperCube 관리자 페이지(웹) → Servers → Pending 탭 → 방금 등록된 호스트명 → 승인
+```
+
+승인 후 약 2초 안에 첫 데이터 전송. 로그에서 `Sent NN messages` 같은 줄이 새로 보이면 성공.
+
+### J. USB 정리 + 종료
+
+```bash
+# USB 마운트 해제
+sudo umount /mnt/usb
+# USB 물리적으로 빼기 OK
+```
+
+SSH 세션 끝내려면:
+```bash
+exit
+```
+
+**여기까지가 정상 흐름**입니다. 어디선가 막히면 § 7~8 보고 진단 번들을 만들어 빌드 PC로 가져오세요.
+
+---
+
 ## 0. 흐름 한눈에
 
 ```
@@ -203,299 +460,298 @@ sudo systemctl is-enabled hypercube-agent   # → enabled
 
 ## 7. 트러블슈팅
 
-각 케이스마다 **(1) 보이는 증상**, **(2) 즉시 시도**, **(3) 안 되면 가져올 정보** 순서로 정리했습니다. (3)의 명령은 그대로 복붙해서 출력 파일을 만든 뒤, **§ 8의 진단 번들**과 함께 빌드 PC로 가져오세요.
-
-### 7.1. 인스톨러 시작 즉시 실패 (pre-flight)
-
-**증상:**
-```
-[X] Missing required command: tar         # 매우 드묾
-[X] Missing required command: dpkg        # RHEL/Rocky 등 non-Debian
-[X] Run as root (sudo ./...)              # sudo 없이 실행
-```
-
-**즉시:**
-- `tar`: `sudo apt-get install -y tar`
-- `dpkg`: 호스트가 Ubuntu/Debian이 아닙니다. `HC_BUNDLE_DOCKER=0`로 빌드한 슬림 인스톨러로 재배포하고, Docker는 배포판 방식으로 사전 설치
-- `Run as root`: 앞에 `sudo` 붙여 다시 실행
-
-**가져올 정보 (해결 안 될 때):**
-```bash
-{
-  echo "=== uname / os-release ==="
-  uname -a
-  cat /etc/os-release
-  echo "=== whoami / id ==="
-  whoami; id
-  echo "=== installer file ==="
-  ls -lh /path/to/hypercube-agent-installer-*.sh
-  sha256sum /path/to/hypercube-agent-installer-*.sh
-} | tee /tmp/hc-diag-preflight.txt
-```
+> ### 🚨 막혔을 때 가장 먼저 할 일
+> **무엇이 문제인지 모르겠으면 그냥 [§ 8 진단 번들](#8-진단-번들-한-방에-만들기)을 만들어서 빌드 PC로 가져오세요.** 한 줄 명령으로 모든 정보를 자동으로 수집합니다. 그게 가장 빠릅니다.
+>
+> 아래 케이스별 가이드는 **본인이 직접 해보고 싶을 때**의 참고용입니다. 명령어 의미를 모르면 § 8로 바로 가세요.
 
 ---
 
-### 7.2. Docker .deb 설치 실패
+각 케이스는 같은 구조로 정리되어 있습니다:
 
-**증상:**
+- **🖥️ 화면에 보이는 것** — 정확히 이런 메시지가 보이면 이 섹션
+- **❓ 무슨 뜻?** — 한 줄 설명
+- **🔧 빨리 해보기** — 1~3개 단순 명령
+- **🆘 안 되면** — § 8 진단 번들로
+
+---
+
+### 7.1. 인스톨러 시작도 못 함
+
+**🖥️ 화면에 보이는 것:**
+```
+[X] Missing required command: tar
+[X] Missing required command: dpkg
+[X] Run as root (sudo ./...)
+```
+(셋 중 하나)
+
+**❓ 무슨 뜻?** 사전 점검 단계에서 필수 도구가 없거나, 권한이 없다는 뜻.
+
+**🔧 빨리 해보기:**
+
+| 메시지에 있는 단어 | 명령 |
+|---|---|
+| `tar` 없음 | `sudo apt-get install -y tar` |
+| `dpkg` 없음 | 이 서버는 Ubuntu/Debian이 아닌 듯. **빌드 PC로 돌아와** `HC_BUNDLE_DOCKER=0 bash scripts/build-installer.sh`로 슬림 인스톨러 다시 만들고, Docker는 해당 배포판 방식으로 직접 설치 |
+| `Run as root` | 명령어 앞에 `sudo` 붙여서 다시: `sudo /root/hypercube-agent-installer-1.0.0.sh` |
+
+**🆘 안 되면:** § 8 진단 번들
+
+---
+
+### 7.2. Docker 설치하다 멈춤
+
+**🖥️ 화면에 보이는 것:**
 ```
 [X] dpkg failed to install bundled .debs after retries.
 ```
 
-**즉시:**
-1. 타겟이 진짜 Ubuntu 24.04 amd64인지 확인:
-   ```bash
-   . /etc/os-release && echo "${VERSION_CODENAME} / $(dpkg --print-architecture)"
-   # 기대: noble / amd64
-   ```
-2. 다른 dpkg 작업이 진행 중이지 않은지: `pgrep -a dpkg && pgrep -a apt`
-3. 디스크 여유: `df -h /var /tmp`
+**❓ 무슨 뜻?** 번들된 Docker 패키지(.deb)를 설치하려다가 두 번 시도 후 실패. 보통 **타겟이 Ubuntu 24.04 amd64가 아니거나**, 다른 apt 작업이 동시에 돌고 있거나, 디스크가 가득 찬 경우.
 
-**가져올 정보:**
+**🔧 빨리 해보기:**
 ```bash
-{
-  echo "=== os ==="
-  cat /etc/os-release
-  dpkg --print-architecture
-  echo "=== dpkg pass logs (installer가 남긴 것) ==="
-  for f in /tmp/dpkg-pass1.log /tmp/dpkg-pass2.log /tmp/dpkg-configure.log; do
-    echo "--- $f ---"
-    cat "$f" 2>/dev/null || echo "(missing)"
-  done
-  echo "=== 현재 설치된 docker 관련 패키지 ==="
-  dpkg -l | grep -iE 'docker|containerd|runc' || echo "(none)"
-  echo "=== bundled deb 목록 ==="
-  ls /tmp/hc-payload.*/docker-debs/ 2>/dev/null || echo "(payload already cleaned up)"
-  echo "=== disk ==="
-  df -h /var /tmp /
-} | tee /tmp/hc-diag-deb.txt
+# 1) Ubuntu 24.04 amd64인지 확인
+. /etc/os-release && echo "$VERSION_CODENAME / $(dpkg --print-architecture)"
+# 기대: noble / amd64
 ```
+```bash
+# 2) 다른 패키지 작업 안 돌고 있는지 확인 (출력 비어 있어야 정상)
+pgrep -a dpkg
+pgrep -a apt
+```
+```bash
+# 3) 디스크 여유 확인 (Avail 컬럼이 1G 이상이어야 안전)
+df -h /var /tmp
+```
+
+위 중 **(1)**에서 noble/amd64 안 나오면 → 이 가이드의 인스톨러 적용 대상이 아닙니다. **빌드 PC**로 와서 알려주세요.
+
+**🆘 안 되면:** § 8 진단 번들
 
 ---
 
-### 7.3. dockerd가 안 뜸
+### 7.3. Docker는 깔렸는데 안 켜짐
 
-**증상:**
+**🖥️ 화면에 보이는 것:**
 ```
 [X] Docker daemon never came up. Last log:
 ...
 ```
 
-**즉시:**
-1. 이미 떠 있는 다른 dockerd 있는지: `pgrep -af dockerd`
-2. (systemd 있을 때) `sudo systemctl status docker -n 50`
-3. socket 충돌: `ls -la /var/run/docker.sock` 권한·소유자 확인
+**❓ 무슨 뜻?** Docker 패키지는 설치됐지만 데몬(`dockerd`)이 부팅에 실패. 보통 다른 Docker가 이미 떠 있거나, 권한/소켓 충돌, 또는 커널 모듈 문제.
 
-**가져올 정보:**
+**🔧 빨리 해보기:**
 ```bash
-{
-  echo "=== dockerd log (installer가 띄운 것) ==="
-  cat /tmp/hc-dockerd.log 2>/dev/null || echo "(missing)"
-  echo "=== systemd journal (있다면) ==="
-  command -v journalctl >/dev/null && journalctl -u docker -n 100 --no-pager 2>/dev/null
-  echo "=== systemctl status ==="
-  command -v systemctl >/dev/null && systemctl status docker -n 30 --no-pager 2>/dev/null
-  echo "=== dockerd processes ==="
-  pgrep -af dockerd || echo "(no dockerd running)"
-  ps -eo pid,ppid,cmd | grep -E 'docker|containerd' | grep -v grep
-  echo "=== socket / lib ==="
-  ls -la /var/run/docker.sock 2>/dev/null
-  ls -la /var/lib/docker/ 2>/dev/null | head -20
-  echo "=== kernel ==="
-  uname -r
-  dmesg 2>/dev/null | tail -30
-  echo "=== cgroup support ==="
-  ls /sys/fs/cgroup/ | head
-} | tee /tmp/hc-diag-dockerd.txt
+# 1) 다른 dockerd가 이미 떠 있는지 (출력 비어 있어야 정상)
+pgrep -af dockerd
 ```
+```bash
+# 2) systemd 있으면 재시작 시도
+sudo systemctl restart docker
+sudo systemctl status docker --no-pager -n 20
+```
+```bash
+# 3) 그래도 안 되면 socket 정리 후 재시도
+sudo rm -f /var/run/docker.sock
+sudo systemctl restart docker
+```
+
+**🆘 안 되면:** § 8 진단 번들 — `/tmp/hc-dockerd.log`가 자동 포함됩니다.
 
 ---
 
-### 7.4. 이미지 로드 실패
+### 7.4. Docker는 떴는데 이미지 로드 실패
 
-**증상:**
+**🖥️ 화면에 보이는 것:**
 ```
-[X] ... docker load: ... no space left on device
-[X] ... open /var/lib/docker/...: permission denied
+... no space left on device
+... permission denied
 ```
 
-**즉시:**
-- 디스크 여유: `df -h /var/lib/docker`
-- 권한: `ls -la /var/lib/docker`
+**❓ 무슨 뜻?** 디스크가 부족하거나, `/var/lib/docker` 권한 문제.
 
-**가져올 정보:**
+**🔧 빨리 해보기:**
 ```bash
-{
-  echo "=== disk ==="
-  df -h /var/lib/docker /var /
-  echo "=== docker info ==="
-  docker info 2>&1 | head -50
-  echo "=== docker images (현재) ==="
-  docker images 2>&1
-  echo "=== payload .tar 크기 ==="
-  ls -la /tmp/hc-payload.*/agent-image.tar 2>/dev/null || echo "(payload cleaned up)"
-} | tee /tmp/hc-diag-image.txt
+# 1) 디스크 (Avail 1G 이상 필요)
+df -h /var/lib/docker
 ```
+```bash
+# 2) 디스크가 적으면 docker 캐시 비우기
+sudo docker system prune -af
+df -h /var/lib/docker
+```
+
+**🆘 안 되면:** § 8 진단 번들
 
 ---
 
-### 7.5. 컨테이너가 안 뜸 / 즉시 종료
+### 7.5. Agent 컨테이너가 안 뜨거나 즉시 죽음
 
-**증상:**
+**🖥️ 화면에 보이는 것:**
 ```
 [X] Agent container did not come up. Check: docker logs hypercube-agent
 ```
-또는 `docker ps`에 잠깐 보였다가 사라짐.
+또는 `docker ps`에 잠깐 떴다가 사라짐.
 
-**즉시:**
-1. `docker logs hypercube-agent --tail 100` — 컨테이너 안 에러
-2. `docker inspect hypercube-agent --format '{{.State.Status}}: {{.State.Error}}'`
-3. compose 파일 검증: `cd /opt/hypercube-agent && docker compose config`
+**❓ 무슨 뜻?** Agent가 시작 직후 에러로 종료. .env 설정 문제거나 마운트할 파일이 호스트에 없는 경우.
 
-**가져올 정보:**
+**🔧 빨리 해보기:**
 ```bash
-{
-  echo "=== container state ==="
-  docker ps -a --filter name=hypercube-agent
-  docker inspect hypercube-agent 2>&1 | head -100
-  echo "=== container logs ==="
-  docker logs hypercube-agent --tail 200 2>&1
-  echo "=== compose config ==="
-  cat /opt/hypercube-agent/docker-compose.yml
-  cd /opt/hypercube-agent && docker compose config 2>&1
-  echo "=== env (sanitized — BACKEND/HOSTNAME만 표시) ==="
-  grep -E '^(BACKEND|AGENT_HOSTNAME|GPU)' /opt/hypercube-agent/.env
-  echo "=== required mount points ==="
-  ls -la /var/run/docker.sock /var/run/utmp /etc/hostname 2>&1
-  ls -la /proc | head -5
-} | tee /tmp/hc-diag-container.txt
+# 1) Agent 마지막 로그 — 어떤 에러가 났는지 보여줌
+docker logs hypercube-agent --tail 50
 ```
+```bash
+# 2) 컨테이너 종료 이유 확인
+docker inspect hypercube-agent --format '{{.State.Status}}: {{.State.Error}}'
+```
+```bash
+# 3) compose 파일 문법 검증
+cd /opt/hypercube-agent && docker compose config >/dev/null && echo "OK"
+```
+
+**🆘 안 되면:** § 8 진단 번들
 
 ---
 
-### 7.6. Agent는 떠 있는데 Backend 연결 실패만 반복
+### 7.6. Agent는 떠 있는데 Backend 연결만 안 됨
 
-**증상:**
+**🖥️ 화면에 보이는 것:**
 ```
 [INFO] [agent] Starting HyperCube Agent (...)
 [INFO] [docker] Docker connection established.
 [ERROR] [register] Connection failed: fetch failed. Retrying in 30s...
 ```
-(이게 무한 반복)
+(이게 30초마다 무한 반복)
 
-**즉시:**
-1. `.env`의 backend URL 확인: `grep BACKEND /opt/hypercube-agent/.env`
-2. 호스트에서 직접 닿는지: `curl -v --max-time 5 $BACKEND_API_URL/api/agents/`
-3. Backend 살아 있나: 다른 Agent가 정상 동작 중이면 Backend OK → 이 호스트만의 네트워크/방화벽 이슈
+**❓ 무슨 뜻?** Agent는 정상 기동했지만 Backend(HyperCube 서버)에 못 닿음. 보통 **(a)** Backend URL이 틀렸거나, **(b)** 방화벽이 막고 있거나, **(c)** Backend가 꺼진 상태.
 
-**가져올 정보:**
+**🔧 빨리 해보기:**
 ```bash
-{
-  echo "=== .env 설정 ==="
-  grep -E '^(BACKEND|AGENT_HOSTNAME)' /opt/hypercube-agent/.env
-  echo "=== 호스트→Backend 직접 접속 ==="
-  source /opt/hypercube-agent/.env 2>/dev/null
-  echo "URL: $BACKEND_API_URL"
-  curl -v --max-time 5 "$BACKEND_API_URL/api/agents/" 2>&1 | head -40
-  echo "=== DNS / 라우팅 ==="
-  ip route
-  cat /etc/resolv.conf 2>/dev/null
-  echo "=== ping ==="
-  backend_host=$(echo "$BACKEND_API_URL" | sed -E 's|^https?://||; s|[:/].*||')
-  ping -c 3 -W 2 "$backend_host" 2>&1 | tail -5
-  echo "=== agent 측 로그 ==="
-  docker logs hypercube-agent --tail 50 2>&1
-} | tee /tmp/hc-diag-backend.txt
+# 1) .env에 적힌 Backend 주소 확인
+grep BACKEND /opt/hypercube-agent/.env
+```
+```bash
+# 2) 호스트에서 직접 Backend에 닿는지 (10초 안에 응답 와야 정상)
+source /opt/hypercube-agent/.env
+curl -v --max-time 10 "$BACKEND_API_URL/api/agents/"
+```
+```bash
+# 3) ping이라도 닿는지 (Backend host 부분만 추출)
+backend_host=$(echo "$BACKEND_API_URL" | sed -E 's|^https?://||; s|[:/].*||')
+ping -c 3 -W 2 "$backend_host"
 ```
 
-> **사이드 노트**: 등록 후엔 Backend 관리자가 **승인(approve)** 해야 데이터가 흐릅니다. 위 로그에 `Registration accepted (status: pending)`만 보이고 그 뒤로 아무 것도 없으면 **에러가 아니라 승인 대기 상태** — Backend 관리자 페이지에서 처리하세요.
+**(2)** 가 timeout이면 방화벽·라우팅 문제. **(1)** 의 URL이 틀렸으면 `.env` 수정 후 재시작:
+```bash
+sudo nano /opt/hypercube-agent/.env       # 또는 본인이 편한 에디터
+sudo systemctl restart hypercube-agent
+# systemd 없으면
+cd /opt/hypercube-agent && sudo docker compose up -d --force-recreate
+```
+
+**ℹ️ 헷갈리기 쉬운 정상 상태:** 로그에 `Registration accepted (status: pending)` 만 보이고 그 뒤가 조용하면 **에러가 아닙니다** — Backend 관리자 페이지에서 **승인** 안 한 상태. § 따라하기 § I 참고.
+
+**🆘 안 되면:** § 8 진단 번들
 
 ---
 
 ### 7.7. GPU 메트릭이 안 잡힘
 
-**증상:**
+**🖥️ 화면에 보이는 것 (Agent 로그에서):**
 ```
 [WARN] [gpu-pmon] nvidia-smi unavailable
+```
+또는
+```
 [DEBUG] [gpu-pmon] pmon returned empty (idle)
 ```
 
-**즉시:**
-- 첫 번째: 호스트에 NVIDIA 드라이버 + `nvidia-container-toolkit`이 깔려 있어야 합니다 (Agent는 깔지 못함). `nvidia-smi` 호스트에서 동작하는지 확인.
-- 두 번째: **정상**. RTX 계열은 GPU idle 시 sm 측정을 차단. 부하가 발생하면 자동으로 측정됨.
+**❓ 무슨 뜻?**
+- 위쪽: 호스트에 NVIDIA 드라이버 또는 `nvidia-container-toolkit`이 안 깔려 있음.
+- 아래쪽: **정상**. RTX 계열은 GPU 부하가 없을 때 측정을 차단합니다. 부하 생기면 자동 측정.
 
-**가져올 정보 (드라이버는 있는데도 안 잡힐 때):**
+**🔧 빨리 해보기:**
 ```bash
-{
-  echo "=== host nvidia-smi ==="
-  nvidia-smi 2>&1
-  echo "=== nvidia-container-toolkit ==="
-  dpkg -l | grep nvidia-container 2>/dev/null
-  command -v nvidia-ctk && nvidia-ctk --version
-  echo "=== docker daemon.json ==="
-  cat /etc/docker/daemon.json 2>/dev/null
-  echo "=== container 안에서 nvidia-smi 보이나 ==="
-  docker exec hypercube-agent nvidia-smi 2>&1 | head -20
-  echo "=== gpu 관련 agent log ==="
-  docker logs hypercube-agent 2>&1 | grep -iE 'gpu|nvidia|pmon|dcgm' | tail -30
-} | tee /tmp/hc-diag-gpu.txt
+# 1) 호스트에 nvidia-smi 동작하나
+nvidia-smi
 ```
+```bash
+# 2) 컨테이너 안에서도 보이나
+docker exec hypercube-agent nvidia-smi 2>&1 | head -5
+```
+
+`(1)`이 안 되면 → NVIDIA 드라이버가 호스트에 없습니다. (Agent가 깔지 못함 — 부록 B 참조)
+`(1)`은 되는데 `(2)`만 안 되면 → `nvidia-container-toolkit` 누락. 부록 B로.
+
+**🆘 안 되면:** § 8 진단 번들
 
 ---
 
-### 7.8. 인스톨러 "payload marker not found"
+### 7.8. "payload marker not found"
 
-**증상:**
+**🖥️ 화면에 보이는 것:**
 ```
 [X] Payload marker not found — is this a built installer?
 ```
 
-**원인 후보:**
-1. 빌드가 안 끝난 / 깨진 .sh 받음
-2. USB 복사 중 텍스트 모드 변환 (예: scp 옵션, FTP ASCII 모드)
-3. 안티바이러스가 .sh 끝부분 잘라먹음
+**❓ 무슨 뜻?** 인스톨러 파일(.sh)이 손상됐어요. USB 복사가 깨졌거나 안티바이러스가 끝부분을 잘라먹었거나.
 
-**즉시:**
+**🔧 빨리 해보기:**
+
+폐쇄망 서버에서:
 ```bash
-sha256sum /path/to/hypercube-agent-installer-*.sh
-# 빌드 PC의 sha256sum과 비교
+sha256sum /root/hypercube-agent-installer-1.0.0.sh
 ```
 
-빌드 PC에서:
-```bash
-sha256sum dist-installer/hypercube-agent-installer-*.sh
+**빌드 PC**(인스톨러 만든 곳)에서:
+```powershell
+sha256sum dist-installer/hypercube-agent-installer-1.0.0.sh
 ```
 
-두 해시 다르면 USB 재복사 (반드시 바이너리 모드).
+두 해시가 다르면 → USB 복사 다시 (반드시 바이너리 모드, FTP면 `binary` 명령). 같으면 빌드 자체가 깨진 것 → 빌드 PC에서 `bash scripts/build-installer.sh` 다시.
+
+**🆘 안 되면:** § 8 진단 번들
 
 ---
 
-### 7.9. systemd 등록은 됐는데 자동 시작 안 됨
+### 7.9. 재부팅 후 Agent 자동 시작 안 됨
 
-**증상:** 재부팅 후 `docker ps`에 hypercube-agent 없음.
+**🖥️ 화면에 보이는 것:** 재부팅 후 `docker ps`에 hypercube-agent가 없음.
 
-**즉시:**
+**❓ 무슨 뜻?** systemd가 부팅 시 Agent를 안 띄움. 보통 systemd 등록을 안 했거나, Docker 데몬보다 먼저 시도됐거나.
+
+**🔧 빨리 해보기:**
 ```bash
-systemctl is-enabled hypercube-agent   # → enabled 여야 함
-systemctl status hypercube-agent
-journalctl -u hypercube-agent -n 50 --no-pager
+# 1) 자동 시작 등록 상태 확인 — 'enabled' 나와야 정상
+systemctl is-enabled hypercube-agent
+```
+```bash
+# 2) 'disabled'면 등록
+sudo systemctl enable hypercube-agent
+sudo systemctl start hypercube-agent
+```
+```bash
+# 3) 시작 실패 이유 확인
+sudo systemctl status hypercube-agent --no-pager -n 30
+sudo journalctl -u hypercube-agent -n 50 --no-pager
 ```
 
-**가져올 정보:**
-```bash
-{
-  systemctl status hypercube-agent --no-pager 2>&1
-  systemctl status docker --no-pager 2>&1
-  journalctl -u hypercube-agent -n 100 --no-pager 2>&1
-  cat /etc/systemd/system/hypercube-agent.service
-} | tee /tmp/hc-diag-systemd.txt
-```
+**🆘 안 되면:** § 8 진단 번들 — systemd journal이 자동 포함됩니다.
 
 ---
 
 ## 8. 진단 번들 한 방에 만들기
 
-문제 종류를 모르겠을 때, 또는 빌드 PC로 가져와서 한 번에 분석하고 싶을 때 — 아래 스니펫을 **그대로 복붙**해서 실행하면 `/tmp/hc-diag-bundle-*.tar.gz`이 생깁니다. 이 파일 한 개를 USB로 가져오시면 됩니다.
+**막혔을 때 본인이 할 일은 딱 두 가지:**
+1. 아래 명령 한 줄 복붙해서 실행 → 작은 .tar.gz 파일 하나 생김
+2. USB에 넣어서 빌드 PC로 가져오기
+
+그러면 빌드 PC에서 분석해서 다음 인스톨러로 고쳐서 보내드릴 수 있습니다.
+
+### 어떻게 실행?
+
+폐쇄망 서버에 SSH 들어간 상태에서, 아래 블록 **전체를 그대로 복붙**해서 Enter:
 
 ```bash
 sudo bash -c '
@@ -578,14 +834,48 @@ echo "==============================================================="
 '
 ```
 
-산출물 예: `/tmp/hc-diag-bundle-20260507-103245.tar.gz` (보통 < 1MB).
+### 끝나면 마지막에 이런 메시지가 보입니다
 
-USB로 빌드 PC에 가져와 `tar tzf hc-diag-bundle-*.tar.gz`로 내용 확인 후 분석하면 됩니다.
+```
+===============================================================
+DONE. Send this file to the build PC:
+-rw-r--r-- 1 root root 47K Aug 14 10:32 /tmp/hc-diag-bundle-20260814-103245.tar.gz
+===============================================================
+```
 
-### 보낼 때 같이 알려주면 좋은 것
-- **무엇을 하다가 막혔는지**: "인스톨러 첫 실행", "재부팅 후", "수일 운영하다가" 등
-- **마지막에 본 에러 메시지** 한 줄
-- **언제 발생** (대략적인 시간 — 로그 정렬에 도움)
+### USB로 가져오기
+
+```bash
+# USB가 /mnt/usb에 마운트돼 있는 상태에서
+sudo cp /tmp/hc-diag-bundle-*.tar.gz /mnt/usb/
+sudo umount /mnt/usb
+```
+
+USB 빼서 빌드 PC에 꽂은 뒤, 그 .tar.gz 파일을 알려주세요 (메일·메신저 등으로 보내거나, 빌드 PC에서 직접 읽어서 분석).
+
+### 함께 알려주면 좋은 것
+
+진단 번들과 함께 다음 정보를 글로 전달해 주세요:
+
+1. **무엇을 하다가 막혔는지**
+   - 예: "인스톨러 첫 실행에서", "재부팅 후 자동 시작이 안 됐는데", "1주일 잘 돌다가 갑자기"
+2. **마지막에 본 에러 메시지** 한 줄 (사진 찍어 보내도 OK)
+3. **대략 언제 발생** (오늘 14:30 같이 — 로그 시간대 매칭에 도움)
+4. **어디까지는 됐는지** (Pre-flight는 통과했는지, Docker는 깔렸는지 등)
+
+### .tar.gz 안에 뭐가 들어 있나? (참고용)
+
+| 파일 | 무엇 |
+|---|---|
+| `system.txt` | OS 정보 + Docker 상태 + 컨테이너 목록 + 마운트 + 디스크 + 네트워크 |
+| `agent.log` | Agent 컨테이너 마지막 500줄 로그 |
+| `journal-docker.log` | systemd가 본 Docker 로그 |
+| `journal-agent.log` | systemd가 본 Agent 로그 |
+| `dpkg-pass1.log`, `dpkg-pass2.log`, `dpkg-configure.log` | Docker .deb 설치 시도 흔적 |
+| `hc-dockerd.log` | 인스톨러가 띄운 dockerd의 부팅 로그 |
+| `backend-reach.txt` | 호스트에서 Backend 실제로 닿는지 테스트 |
+
+비밀번호·토큰 같은 민감 정보는 자동 포함되지 않게 만들어졌습니다 (`.env`에서 `BACKEND/AGENT_HOSTNAME/GPU` 라인만 추출).
 
 ## 9. 안전 모드 — 인스톨러 없이 직접 손보기
 
