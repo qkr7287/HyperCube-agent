@@ -1,9 +1,13 @@
 #!/bin/bash
 # HyperCube Agent self-extracting installer.
 #
-# Layout: this script + a docker image tar payload are concatenated by
+# Layout: this script + a tar payload are concatenated by
 # scripts/build-installer.sh. The marker line below tells us where the
-# payload starts so we can `tail -c +N | docker load`.
+# payload starts so we can `tail -c +N | tar x` it back out.
+#
+# Payload contents:
+#   agent-image.tar            (always)
+#   docker-debs/*.deb          (optional — Ubuntu 24.04 amd64 Docker bundle)
 set -euo pipefail
 
 VERSION="__VERSION__"
@@ -14,11 +18,19 @@ COMPOSE_PATH="${INSTALL_DIR}/docker-compose.yml"
 SERVICE_NAME="hypercube-agent"
 PAYLOAD_MARKER="__PAYLOAD_BELOW__"
 
+PAYLOAD_DIR=""
+USE_SYSTEMD=0
+
 # ----- helpers ---------------------------------------------------------------
 log()  { printf '\033[1;34m[*]\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m[OK]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
 err()  { printf '\033[1;31m[X]\033[0m %s\n' "$*" >&2; }
+
+cleanup() {
+  [[ -n "$PAYLOAD_DIR" && -d "$PAYLOAD_DIR" ]] && rm -rf "$PAYLOAD_DIR"
+}
+trap cleanup EXIT
 
 require_root() {
   if [[ $EUID -ne 0 ]]; then
@@ -35,27 +47,19 @@ require_cmd() {
   fi
 }
 
+has_cmd() { command -v "$1" >/dev/null 2>&1; }
+
 # ----- pre-flight ------------------------------------------------------------
 preflight() {
   log "Pre-flight checks..."
+  # Docker + dpkg are checked LATER. dpkg is only needed when we actually
+  # have to install bundled .debs; a host that already has Docker can run
+  # this installer on any distro (Alpine, RHEL, etc.).
   require_cmd tar    "Install with: apt-get install -y tar"
-  require_cmd docker "Install Docker Engine first. See docs/airgap-install.md"
   require_cmd awk
   require_cmd sed
 
-  if ! docker info >/dev/null 2>&1; then
-    err "Docker daemon is not reachable. Is the service running?"
-    echo "    Try: systemctl start docker" >&2
-    exit 1
-  fi
-
-  if ! docker compose version >/dev/null 2>&1; then
-    err "Docker Compose plugin not found."
-    echo "    Install: apt-get install -y docker-compose-plugin" >&2
-    exit 1
-  fi
-
-  if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+  if has_cmd systemctl && [[ -d /run/systemd/system ]]; then
     USE_SYSTEMD=1
   else
     USE_SYSTEMD=0
@@ -66,7 +70,6 @@ preflight() {
 
 # ----- input -----------------------------------------------------------------
 prompt() {
-  # prompt VAR_NAME "Question" "default"
   local var="$1" question="$2" default="${3:-}"
   local input
   if [[ -n "$default" ]]; then
@@ -85,7 +88,6 @@ is_valid_url() {
 collect_config() {
   log "Configuration"
 
-  # Allow non-interactive override via env (for CI / unattended installs).
   : "${HC_BACKEND_URL:=}" "${HC_BACKEND_API_URL:=}" "${HC_AGENT_HOSTNAME:=}"
   : "${HC_GPU_ENABLED:=}" "${HC_AUTO_START:=}"
 
@@ -134,8 +136,8 @@ collect_config() {
 }
 
 # ----- extract payload -------------------------------------------------------
-extract_image() {
-  log "Extracting bundled image..."
+extract_payload() {
+  log "Extracting bundled payload..."
   local self="$1" line offset
   line=$(grep -an "^${PAYLOAD_MARKER}\$" "$self" | head -1 | cut -d: -f1)
   if [[ -z "$line" ]]; then
@@ -144,19 +146,115 @@ extract_image() {
   fi
   offset=$((line + 1))
 
-  mkdir -p "$INSTALL_DIR"
-  tail -n +"$offset" "$self" > "${INSTALL_DIR}/agent-image.tar"
-  ok "Payload extracted ($(du -h "${INSTALL_DIR}/agent-image.tar" | awk '{print $1}'))."
+  PAYLOAD_DIR="$(mktemp -d -t hc-payload.XXXXXX)"
+  tail -n +"$offset" "$self" | tar x -C "$PAYLOAD_DIR"
 
-  log "Loading image into Docker..."
-  docker load -i "${INSTALL_DIR}/agent-image.tar" >/dev/null
-  rm -f "${INSTALL_DIR}/agent-image.tar"
+  [[ -f "$PAYLOAD_DIR/agent-image.tar" ]] || {
+    err "agent-image.tar not found in payload."
+    exit 1
+  }
+
+  ok "Payload extracted ($(du -sh "$PAYLOAD_DIR" | awk '{print $1}'))."
+}
+
+# ----- install local .debs ---------------------------------------------------
+# Multi-pass dpkg: a single `dpkg -i ./*.deb` often fails on ordering or
+# Pre-Depends. We accept those errors, run `dpkg --configure -a` to retry
+# pending configurations, then make a second install pass. This handles
+# almost every real-world case without pulling in apt resolver complexity.
+install_debs() {
+  local dir="$1"
+  local filter="${2:-}"
+  local glob="$dir/*.deb"
+  [[ -n "$filter" ]] && glob="$dir/${filter}*.deb"
+
+  set +e
+  dpkg -i $glob >/tmp/dpkg-pass1.log 2>&1
+  local rc1=$?
+  if [[ $rc1 -ne 0 ]]; then
+    dpkg --configure -a >/tmp/dpkg-configure.log 2>&1 || true
+    dpkg -i $glob >/tmp/dpkg-pass2.log 2>&1
+    local rc2=$?
+    if [[ $rc2 -ne 0 ]]; then
+      err "dpkg failed to install bundled .debs after retries."
+      tail -20 /tmp/dpkg-pass2.log >&2
+      exit 1
+    fi
+  fi
+  set -e
+}
+
+# ----- ensure docker is available --------------------------------------------
+ensure_docker() {
+  local need_engine=0 need_compose=0
+  has_cmd docker || need_engine=1
+  if has_cmd docker; then
+    docker compose version >/dev/null 2>&1 || need_compose=1
+  fi
+
+  if [[ $need_engine -eq 0 && $need_compose -eq 0 ]]; then
+    return 0
+  fi
+
+  if [[ ! -d "$PAYLOAD_DIR/docker-debs" ]]; then
+    err "Docker is missing and this installer was built without the .deb bundle."
+    echo "    Either install Docker manually (see docs/airgap-install.md) or" >&2
+    echo "    rebuild the installer with HC_BUNDLE_DOCKER=1." >&2
+    exit 1
+  fi
+
+  # dpkg only required when we actually need to install the bundled .debs.
+  require_cmd dpkg "Bundled .debs require Debian/Ubuntu (dpkg). For other distros, install Docker manually first."
+
+  if [[ $need_engine -eq 1 ]]; then
+    log "Docker not found. Installing bundled .debs..."
+    install_debs "$PAYLOAD_DIR/docker-debs"
+  else
+    log "docker compose missing. Installing compose plugin from bundle..."
+    install_debs "$PAYLOAD_DIR/docker-debs" docker-compose-plugin
+  fi
+  ok "Docker .debs installed."
+
+  if [[ "$USE_SYSTEMD" -eq 1 ]]; then
+    log "Starting docker via systemd..."
+    systemctl enable docker >/dev/null 2>&1 || true
+    systemctl start  docker
+  else
+    # No systemd (containers, minimal images). Launch dockerd in a fresh
+    # session so it survives this script's exit. nohup alone isn't enough
+    # because docker-exec's session-reaping kills children when the exec
+    # call returns.
+    if ! pgrep -x dockerd >/dev/null 2>&1; then
+      log "No systemd. Launching dockerd in detached session..."
+      setsid nohup dockerd </dev/null >/tmp/hc-dockerd.log 2>&1 &
+      disown 2>/dev/null || true
+    fi
+  fi
+
+  for i in $(seq 1 30); do
+    if docker info >/dev/null 2>&1; then
+      ok "Docker daemon is up (after ${i}s)."
+      return 0
+    fi
+    sleep 1
+  done
+  err "Docker daemon never came up. Last log:"
+  tail -30 /tmp/hc-dockerd.log 2>/dev/null >&2 || true
+  exit 1
+}
+
+# ----- load agent image ------------------------------------------------------
+load_image() {
+  log "Loading agent image into Docker..."
+  docker load -i "$PAYLOAD_DIR/agent-image.tar" >/dev/null
   ok "Image loaded: ${IMAGE_TAG}"
 }
 
 # ----- write env + compose ---------------------------------------------------
 write_files() {
   log "Writing /opt/hypercube-agent/{.env,docker-compose.yml}..."
+  mkdir -p "$INSTALL_DIR"
+
   local docker_gid
   docker_gid="$(getent group docker | cut -d: -f3 || echo 999)"
 
@@ -259,7 +357,9 @@ main() {
   require_root
   preflight
   collect_config
-  extract_image "$self"
+  extract_payload "$self"
+  ensure_docker
+  load_image
   write_files
   install_systemd
   start_agent
@@ -277,5 +377,5 @@ main() {
 
 main "$@"
 exit 0
-# Anything below this line is the binary docker-image tar payload.
+# Anything below this line is the binary tar payload.
 __PAYLOAD_BELOW__
