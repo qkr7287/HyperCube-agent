@@ -1,0 +1,37 @@
+# Bare Ubuntu 24.04 — no Docker, no compose plugin. Used to verify the
+# installer's auto-install path actually works on a real airgap host that
+# only has the OS.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Only the absolute minimum: sshd so we can poke around, plus iptables
+# for the air-gap firewall and a couple of debug tools. Note: NO docker,
+# NO compose plugin, NO ca-certificates / curl / gnupg — the bundled
+# installer must bring everything it needs.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      openssh-server sudo \
+      iproute2 iputils-ping iptables \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /run/sshd && \
+    echo 'root:hypercube' | chpasswd && \
+    sed -i 's/#*PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#*PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+# Pre-seed /etc/docker/daemon.json with vfs storage driver. This is purely
+# a Docker-Desktop-on-Windows + WSL2 + nested-Docker workaround: overlay-
+# on-overlay mounts fail with "invalid argument". On a real bare-metal
+# Ubuntu host this file would not exist and dockerd would default to
+# overlay2. The installer doesn't touch /etc/docker, so this opt-in lives
+# entirely in the test image.
+RUN mkdir -p /etc/docker && \
+    printf '{\n  "storage-driver": "vfs"\n}\n' > /etc/docker/daemon.json
+
+EXPOSE 22
+
+COPY entrypoint-bare.sh /usr/local/bin/sandbox-entrypoint.sh
+RUN chmod +x /usr/local/bin/sandbox-entrypoint.sh
+
+CMD ["/usr/local/bin/sandbox-entrypoint.sh"]

@@ -1,0 +1,8 @@
+# Force LF on shell scripts so they survive Windows checkouts and remain
+# executable in Linux containers / Mutagen-synced dev environments.
+*.sh    text eol=lf
+*.bash  text eol=lf
+
+# Also LF for compose / yaml so docker compose doesn't choke on CRLF.
+*.yml   text eol=lf
+*.yaml  text eol=lf
