@@ -203,54 +203,449 @@ sudo systemctl is-enabled hypercube-agent   # → enabled
 
 ## 7. 트러블슈팅
 
-### 인스톨러 첫머리에서 즉시 실패
+각 케이스마다 **(1) 보이는 증상**, **(2) 즉시 시도**, **(3) 안 되면 가져올 정보** 순서로 정리했습니다. (3)의 명령은 그대로 복붙해서 출력 파일을 만든 뒤, **§ 8의 진단 번들**과 함께 빌드 PC로 가져오세요.
 
-```
-[X] Missing required command: tar
-```
-→ `apt-get install -y tar` (거의 발생 안 함 — Ubuntu 기본 포함)
+### 7.1. 인스톨러 시작 즉시 실패 (pre-flight)
 
+**증상:**
 ```
-[X] Missing required command: dpkg
-    Bundled .debs require Debian/Ubuntu (dpkg). For other distros, install Docker manually first.
+[X] Missing required command: tar         # 매우 드묾
+[X] Missing required command: dpkg        # RHEL/Rocky 등 non-Debian
+[X] Run as root (sudo ./...)              # sudo 없이 실행
 ```
-→ RHEL/Rocky 등 비-Debian 호스트에서 발생. `HC_BUNDLE_DOCKER=0`로 빌드된 슬림 인스톨러를 사용하고, Docker는 해당 배포판 방식으로 사전 설치하세요.
 
-### Docker .deb 설치 단계에서 실패
+**즉시:**
+- `tar`: `sudo apt-get install -y tar`
+- `dpkg`: 호스트가 Ubuntu/Debian이 아닙니다. `HC_BUNDLE_DOCKER=0`로 빌드한 슬림 인스톨러로 재배포하고, Docker는 배포판 방식으로 사전 설치
+- `Run as root`: 앞에 `sudo` 붙여 다시 실행
 
+**가져올 정보 (해결 안 될 때):**
+```bash
+{
+  echo "=== uname / os-release ==="
+  uname -a
+  cat /etc/os-release
+  echo "=== whoami / id ==="
+  whoami; id
+  echo "=== installer file ==="
+  ls -lh /path/to/hypercube-agent-installer-*.sh
+  sha256sum /path/to/hypercube-agent-installer-*.sh
+} | tee /tmp/hc-diag-preflight.txt
+```
+
+---
+
+### 7.2. Docker .deb 설치 실패
+
+**증상:**
 ```
 [X] dpkg failed to install bundled .debs after retries.
 ```
-→ 인스톨러가 `dpkg -i` 두 번 + `dpkg --configure -a`까지 시도하고도 실패한 경우. 배포판 또는 버전 불일치 가능성:
-1. 타겟이 진짜 Ubuntu 24.04 amd64인지 확인 (`. /etc/os-release && echo $VERSION_CODENAME` → `noble`)
-2. 빌드 시 `fetch-docker-debs.sh`가 같은 코드네임 기준으로 .deb를 받았는지 확인
 
-### Agent가 Backend 연결 실패만 반복
+**즉시:**
+1. 타겟이 진짜 Ubuntu 24.04 amd64인지 확인:
+   ```bash
+   . /etc/os-release && echo "${VERSION_CODENAME} / $(dpkg --print-architecture)"
+   # 기대: noble / amd64
+   ```
+2. 다른 dpkg 작업이 진행 중이지 않은지: `pgrep -a dpkg && pgrep -a apt`
+3. 디스크 여유: `df -h /var /tmp`
 
+**가져올 정보:**
+```bash
+{
+  echo "=== os ==="
+  cat /etc/os-release
+  dpkg --print-architecture
+  echo "=== dpkg pass logs (installer가 남긴 것) ==="
+  for f in /tmp/dpkg-pass1.log /tmp/dpkg-pass2.log /tmp/dpkg-configure.log; do
+    echo "--- $f ---"
+    cat "$f" 2>/dev/null || echo "(missing)"
+  done
+  echo "=== 현재 설치된 docker 관련 패키지 ==="
+  dpkg -l | grep -iE 'docker|containerd|runc' || echo "(none)"
+  echo "=== bundled deb 목록 ==="
+  ls /tmp/hc-payload.*/docker-debs/ 2>/dev/null || echo "(payload already cleaned up)"
+  echo "=== disk ==="
+  df -h /var /tmp /
+} | tee /tmp/hc-diag-deb.txt
 ```
+
+---
+
+### 7.3. dockerd가 안 뜸
+
+**증상:**
+```
+[X] Docker daemon never came up. Last log:
+...
+```
+
+**즉시:**
+1. 이미 떠 있는 다른 dockerd 있는지: `pgrep -af dockerd`
+2. (systemd 있을 때) `sudo systemctl status docker -n 50`
+3. socket 충돌: `ls -la /var/run/docker.sock` 권한·소유자 확인
+
+**가져올 정보:**
+```bash
+{
+  echo "=== dockerd log (installer가 띄운 것) ==="
+  cat /tmp/hc-dockerd.log 2>/dev/null || echo "(missing)"
+  echo "=== systemd journal (있다면) ==="
+  command -v journalctl >/dev/null && journalctl -u docker -n 100 --no-pager 2>/dev/null
+  echo "=== systemctl status ==="
+  command -v systemctl >/dev/null && systemctl status docker -n 30 --no-pager 2>/dev/null
+  echo "=== dockerd processes ==="
+  pgrep -af dockerd || echo "(no dockerd running)"
+  ps -eo pid,ppid,cmd | grep -E 'docker|containerd' | grep -v grep
+  echo "=== socket / lib ==="
+  ls -la /var/run/docker.sock 2>/dev/null
+  ls -la /var/lib/docker/ 2>/dev/null | head -20
+  echo "=== kernel ==="
+  uname -r
+  dmesg 2>/dev/null | tail -30
+  echo "=== cgroup support ==="
+  ls /sys/fs/cgroup/ | head
+} | tee /tmp/hc-diag-dockerd.txt
+```
+
+---
+
+### 7.4. 이미지 로드 실패
+
+**증상:**
+```
+[X] ... docker load: ... no space left on device
+[X] ... open /var/lib/docker/...: permission denied
+```
+
+**즉시:**
+- 디스크 여유: `df -h /var/lib/docker`
+- 권한: `ls -la /var/lib/docker`
+
+**가져올 정보:**
+```bash
+{
+  echo "=== disk ==="
+  df -h /var/lib/docker /var /
+  echo "=== docker info ==="
+  docker info 2>&1 | head -50
+  echo "=== docker images (현재) ==="
+  docker images 2>&1
+  echo "=== payload .tar 크기 ==="
+  ls -la /tmp/hc-payload.*/agent-image.tar 2>/dev/null || echo "(payload cleaned up)"
+} | tee /tmp/hc-diag-image.txt
+```
+
+---
+
+### 7.5. 컨테이너가 안 뜸 / 즉시 종료
+
+**증상:**
+```
+[X] Agent container did not come up. Check: docker logs hypercube-agent
+```
+또는 `docker ps`에 잠깐 보였다가 사라짐.
+
+**즉시:**
+1. `docker logs hypercube-agent --tail 100` — 컨테이너 안 에러
+2. `docker inspect hypercube-agent --format '{{.State.Status}}: {{.State.Error}}'`
+3. compose 파일 검증: `cd /opt/hypercube-agent && docker compose config`
+
+**가져올 정보:**
+```bash
+{
+  echo "=== container state ==="
+  docker ps -a --filter name=hypercube-agent
+  docker inspect hypercube-agent 2>&1 | head -100
+  echo "=== container logs ==="
+  docker logs hypercube-agent --tail 200 2>&1
+  echo "=== compose config ==="
+  cat /opt/hypercube-agent/docker-compose.yml
+  cd /opt/hypercube-agent && docker compose config 2>&1
+  echo "=== env (sanitized — BACKEND/HOSTNAME만 표시) ==="
+  grep -E '^(BACKEND|AGENT_HOSTNAME|GPU)' /opt/hypercube-agent/.env
+  echo "=== required mount points ==="
+  ls -la /var/run/docker.sock /var/run/utmp /etc/hostname 2>&1
+  ls -la /proc | head -5
+} | tee /tmp/hc-diag-container.txt
+```
+
+---
+
+### 7.6. Agent는 떠 있는데 Backend 연결 실패만 반복
+
+**증상:**
+```
+[INFO] [agent] Starting HyperCube Agent (...)
+[INFO] [docker] Docker connection established.
 [ERROR] [register] Connection failed: fetch failed. Retrying in 30s...
 ```
+(이게 무한 반복)
 
-체크 순서:
-1. `/opt/hypercube-agent/.env`의 `BACKEND_URL`이 실제 Backend 주소와 일치하는지
-2. 호스트에서 `curl -v $BACKEND_API_URL/api/agents/` 응답 오는지 (방화벽)
-3. Backend 컨테이너가 떠 있는지
+**즉시:**
+1. `.env`의 backend URL 확인: `grep BACKEND /opt/hypercube-agent/.env`
+2. 호스트에서 직접 닿는지: `curl -v --max-time 5 $BACKEND_API_URL/api/agents/`
+3. Backend 살아 있나: 다른 Agent가 정상 동작 중이면 Backend OK → 이 호스트만의 네트워크/방화벽 이슈
 
-### GPU가 잡히지 않음
+**가져올 정보:**
+```bash
+{
+  echo "=== .env 설정 ==="
+  grep -E '^(BACKEND|AGENT_HOSTNAME)' /opt/hypercube-agent/.env
+  echo "=== 호스트→Backend 직접 접속 ==="
+  source /opt/hypercube-agent/.env 2>/dev/null
+  echo "URL: $BACKEND_API_URL"
+  curl -v --max-time 5 "$BACKEND_API_URL/api/agents/" 2>&1 | head -40
+  echo "=== DNS / 라우팅 ==="
+  ip route
+  cat /etc/resolv.conf 2>/dev/null
+  echo "=== ping ==="
+  backend_host=$(echo "$BACKEND_API_URL" | sed -E 's|^https?://||; s|[:/].*||')
+  ping -c 3 -W 2 "$backend_host" 2>&1 | tail -5
+  echo "=== agent 측 로그 ==="
+  docker logs hypercube-agent --tail 50 2>&1
+} | tee /tmp/hc-diag-backend.txt
+```
 
+> **사이드 노트**: 등록 후엔 Backend 관리자가 **승인(approve)** 해야 데이터가 흐릅니다. 위 로그에 `Registration accepted (status: pending)`만 보이고 그 뒤로 아무 것도 없으면 **에러가 아니라 승인 대기 상태** — Backend 관리자 페이지에서 처리하세요.
+
+---
+
+### 7.7. GPU 메트릭이 안 잡힘
+
+**증상:**
 ```
 [WARN] [gpu-pmon] nvidia-smi unavailable
-```
-→ 호스트에 NVIDIA 드라이버 + `nvidia-container-toolkit` 설치 필요. Agent가 설치할 수 없는 부분입니다.
-
-```
 [DEBUG] [gpu-pmon] pmon returned empty (idle)
 ```
-→ 정상. GPU에 부하가 없을 때 RTX 계열은 sm 측정을 차단합니다. 부하 발생 시 자동으로 정상 측정.
 
-### 인스톨러가 "payload marker not found"로 실패
+**즉시:**
+- 첫 번째: 호스트에 NVIDIA 드라이버 + `nvidia-container-toolkit`이 깔려 있어야 합니다 (Agent는 깔지 못함). `nvidia-smi` 호스트에서 동작하는지 확인.
+- 두 번째: **정상**. RTX 계열은 GPU idle 시 sm 측정을 차단. 부하가 발생하면 자동으로 측정됨.
 
-빌드 도중 인스톨러 파일이 손상됐거나, 텍스트 모드로 전송돼서 바이너리가 깨졌을 가능성. USB 복사 시 **반드시 바이너리 그대로** 옮기세요. 의심되면 빌드 PC에서 `sha256sum`을 비교하세요.
+**가져올 정보 (드라이버는 있는데도 안 잡힐 때):**
+```bash
+{
+  echo "=== host nvidia-smi ==="
+  nvidia-smi 2>&1
+  echo "=== nvidia-container-toolkit ==="
+  dpkg -l | grep nvidia-container 2>/dev/null
+  command -v nvidia-ctk && nvidia-ctk --version
+  echo "=== docker daemon.json ==="
+  cat /etc/docker/daemon.json 2>/dev/null
+  echo "=== container 안에서 nvidia-smi 보이나 ==="
+  docker exec hypercube-agent nvidia-smi 2>&1 | head -20
+  echo "=== gpu 관련 agent log ==="
+  docker logs hypercube-agent 2>&1 | grep -iE 'gpu|nvidia|pmon|dcgm' | tail -30
+} | tee /tmp/hc-diag-gpu.txt
+```
+
+---
+
+### 7.8. 인스톨러 "payload marker not found"
+
+**증상:**
+```
+[X] Payload marker not found — is this a built installer?
+```
+
+**원인 후보:**
+1. 빌드가 안 끝난 / 깨진 .sh 받음
+2. USB 복사 중 텍스트 모드 변환 (예: scp 옵션, FTP ASCII 모드)
+3. 안티바이러스가 .sh 끝부분 잘라먹음
+
+**즉시:**
+```bash
+sha256sum /path/to/hypercube-agent-installer-*.sh
+# 빌드 PC의 sha256sum과 비교
+```
+
+빌드 PC에서:
+```bash
+sha256sum dist-installer/hypercube-agent-installer-*.sh
+```
+
+두 해시 다르면 USB 재복사 (반드시 바이너리 모드).
+
+---
+
+### 7.9. systemd 등록은 됐는데 자동 시작 안 됨
+
+**증상:** 재부팅 후 `docker ps`에 hypercube-agent 없음.
+
+**즉시:**
+```bash
+systemctl is-enabled hypercube-agent   # → enabled 여야 함
+systemctl status hypercube-agent
+journalctl -u hypercube-agent -n 50 --no-pager
+```
+
+**가져올 정보:**
+```bash
+{
+  systemctl status hypercube-agent --no-pager 2>&1
+  systemctl status docker --no-pager 2>&1
+  journalctl -u hypercube-agent -n 100 --no-pager 2>&1
+  cat /etc/systemd/system/hypercube-agent.service
+} | tee /tmp/hc-diag-systemd.txt
+```
+
+---
+
+## 8. 진단 번들 한 방에 만들기
+
+문제 종류를 모르겠을 때, 또는 빌드 PC로 가져와서 한 번에 분석하고 싶을 때 — 아래 스니펫을 **그대로 복붙**해서 실행하면 `/tmp/hc-diag-bundle-*.tar.gz`이 생깁니다. 이 파일 한 개를 USB로 가져오시면 됩니다.
+
+```bash
+sudo bash -c '
+TS=$(date +%Y%m%d-%H%M%S)
+OUT=/tmp/hc-diag-bundle-$TS
+mkdir -p "$OUT"
+
+{
+  echo "=== os ==="
+  uname -a
+  cat /etc/os-release
+  dpkg --print-architecture 2>/dev/null
+  date
+  uptime
+  echo
+  echo "=== docker / compose ==="
+  docker --version 2>&1
+  docker compose version 2>&1
+  docker info 2>&1 | head -60
+  echo
+  echo "=== running containers ==="
+  docker ps -a 2>&1
+  echo
+  echo "=== images ==="
+  docker images 2>&1
+  echo
+  echo "=== installed docker pkgs ==="
+  dpkg -l 2>/dev/null | grep -iE "docker|containerd|runc"
+  echo
+  echo "=== systemd ==="
+  command -v systemctl >/dev/null && {
+    systemctl status docker --no-pager -n 30 2>&1
+    systemctl status hypercube-agent --no-pager -n 30 2>&1
+  }
+  echo
+  echo "=== /opt/hypercube-agent ==="
+  ls -la /opt/hypercube-agent/ 2>&1
+  cat /opt/hypercube-agent/docker-compose.yml 2>&1
+  grep -E "^(BACKEND|AGENT_HOSTNAME|GPU)" /opt/hypercube-agent/.env 2>&1
+  echo
+  echo "=== mount points required ==="
+  ls -la /var/run/docker.sock /var/run/utmp /etc/hostname 2>&1
+  echo
+  echo "=== disk ==="
+  df -h
+  echo
+  echo "=== network ==="
+  ip addr
+  ip route
+  cat /etc/resolv.conf 2>/dev/null
+} > "$OUT/system.txt" 2>&1
+
+# Logs
+docker logs hypercube-agent --tail 500 > "$OUT/agent.log" 2>&1 || echo "(agent not running)" > "$OUT/agent.log"
+command -v journalctl >/dev/null && journalctl -u docker -n 300 --no-pager > "$OUT/journal-docker.log" 2>&1
+command -v journalctl >/dev/null && journalctl -u hypercube-agent -n 300 --no-pager > "$OUT/journal-agent.log" 2>&1
+
+# Installer leftovers
+for f in /tmp/dpkg-pass1.log /tmp/dpkg-pass2.log /tmp/dpkg-configure.log /tmp/hc-dockerd.log; do
+  [[ -f "$f" ]] && cp "$f" "$OUT/"
+done
+
+# Backend reachability test
+source /opt/hypercube-agent/.env 2>/dev/null
+[[ -n "${BACKEND_API_URL:-}" ]] && {
+  echo "=== curl $BACKEND_API_URL/api/agents/ ==="
+  curl -v --max-time 5 "$BACKEND_API_URL/api/agents/" 2>&1
+  host=$(echo "$BACKEND_API_URL" | sed -E "s|^https?://||; s|[:/].*||")
+  echo
+  echo "=== ping $host ==="
+  ping -c 3 -W 2 "$host" 2>&1
+} > "$OUT/backend-reach.txt" 2>&1
+
+tar czf "${OUT}.tar.gz" -C /tmp "$(basename $OUT)"
+rm -rf "$OUT"
+echo "==============================================================="
+echo "DONE. Send this file to the build PC:"
+ls -lh "${OUT}.tar.gz"
+echo "==============================================================="
+'
+```
+
+산출물 예: `/tmp/hc-diag-bundle-20260507-103245.tar.gz` (보통 < 1MB).
+
+USB로 빌드 PC에 가져와 `tar tzf hc-diag-bundle-*.tar.gz`로 내용 확인 후 분석하면 됩니다.
+
+### 보낼 때 같이 알려주면 좋은 것
+- **무엇을 하다가 막혔는지**: "인스톨러 첫 실행", "재부팅 후", "수일 운영하다가" 등
+- **마지막에 본 에러 메시지** 한 줄
+- **언제 발생** (대략적인 시간 — 로그 정렬에 도움)
+
+## 9. 안전 모드 — 인스톨러 없이 직접 손보기
+
+자동 인스톨러가 어떤 이유로든 실패하고 빠른 복구가 필요할 때, 같은 일을 손으로 할 수 있습니다.
+
+```bash
+# 1. 인스톨러 안의 payload만 추출 (이미지 + .deb)
+LINE=$(grep -an '^__PAYLOAD_BELOW__$' hypercube-agent-installer-1.0.0.sh | head -1 | cut -d: -f1)
+mkdir -p /tmp/hc-manual
+tail -n +$((LINE+1)) hypercube-agent-installer-1.0.0.sh | tar x -C /tmp/hc-manual
+
+# 2. (필요 시) Docker 수동 설치
+sudo dpkg -i /tmp/hc-manual/docker-debs/*.deb
+sudo dpkg --configure -a
+sudo dpkg -i /tmp/hc-manual/docker-debs/*.deb   # 2-pass
+sudo systemctl enable --now docker
+
+# 3. Agent 이미지 로드
+sudo docker load -i /tmp/hc-manual/agent-image.tar
+
+# 4. /opt/hypercube-agent 직접 작성 (인스톨러가 만들었던 것과 동일)
+sudo mkdir -p /opt/hypercube-agent
+sudo tee /opt/hypercube-agent/.env > /dev/null <<EOF
+BACKEND_URL=ws://10.0.1.20:8000
+BACKEND_API_URL=http://10.0.1.20:8000
+AGENT_HOSTNAME=$(hostname)
+COLLECT_INTERVAL=2000
+DOCKER_SOCKET=/var/run/docker.sock
+HOST_PROC_PATH=/host/proc
+GPU_PER_CONTAINER_ENABLED=true
+DOCKER_GID=$(getent group docker | cut -d: -f3)
+EOF
+
+sudo tee /opt/hypercube-agent/docker-compose.yml > /dev/null <<'EOF'
+services:
+  agent:
+    image: hypercube-agent:1.0.0
+    container_name: hypercube-agent
+    restart: unless-stopped
+    env_file: .env
+    network_mode: host
+    privileged: true
+    pid: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc:/host/proc:ro
+      - /var/run/utmp:/var/run/utmp:ro
+      - /etc/hostname:/host/etc/hostname:ro
+    group_add: ["${DOCKER_GID:-999}"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "10"
+EOF
+
+# 5. 기동
+cd /opt/hypercube-agent && sudo docker compose up -d
+sudo docker logs -f hypercube-agent
+```
 
 ### Docker 데몬이 안 떠 있다는 에러
 
