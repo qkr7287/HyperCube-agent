@@ -946,13 +946,119 @@ sudo docker logs -f hypercube-agent
 - 컨테이너 환경에서 `--privileged` 없이 실행 → 베어메탈 호스트에선 발생 안 함
 - 기존에 다른 dockerd가 떠 있어서 socket 충돌 → `pkill dockerd` 후 재시도
 
-## 부록 A — 비-Ubuntu 호스트에 수동 설치 (RHEL/Rocky 등)
+## 부록 A — 비-Ubuntu 호스트에 수동 설치 (RHEL/Rocky/Alma 등)
 
-번들된 .deb는 Debian 계열 전용입니다. RHEL/Rocky/Alma에선:
+번들된 .deb는 Debian 계열 전용입니다. RHEL/Rocky/Alma에선 **Docker가 호스트에 이미 깔려 있어야** 슬림 인스톨러로 진행됩니다.
 
-1. **빌드 PC에서**: `HC_BUNDLE_DOCKER=0 bash scripts/build-installer.sh` (84MB 슬림 인스톨러)
-2. **타겟에**: `dnf install -y` 등 배포판 방식으로 Docker 먼저 설치
-3. **설치**: 슬림 인스톨러 실행
+### A-1. 빌드 PC에서 — 슬림 인스톨러 만들기
+
+```bash
+cd "C:\Users\agics\Desktop\workspace\01. git\HyperCube-agent"
+git checkout main && git pull
+HC_BUNDLE_DOCKER=0 bash scripts/build-installer.sh
+```
+
+산출물: `dist-installer/hypercube-agent-installer-<version>.sh` (~84MB).
+
+> **주의**: 같은 파일명으로 덮어씁니다. Ubuntu용 풀 인스톨러(169MB)도 같은 이름이라 헷갈리니, 슬림으로 빌드한 직후엔 별도 이름으로 복사해두는 걸 권장:
+> ```bash
+> cp dist-installer/hypercube-agent-installer-1.0.0.sh \
+>    dist-installer/hypercube-agent-installer-1.0.0-slim.sh
+> ```
+
+### A-2. RHEL 8 호스트 사전 점검
+
+SSH 들어가서:
+
+```bash
+# 1) OS 확인 (RHEL 8.x 또는 호환 — Rocky 8, Alma 8 등)
+cat /etc/redhat-release
+# 예: Red Hat Enterprise Linux 8.4 (Ootpa)
+```
+```bash
+# 2) Docker 설치돼 있고 동작하나
+docker --version
+docker compose version
+sudo systemctl is-active docker
+```
+모두 OK 떠야 다음 단계로. 아래 중 하나라도 실패하면 **RHEL용 Docker 먼저 설치** (§ A-4).
+
+```bash
+# 3) SELinux 상태 — Enforcing이면 컨테이너 마운트 권한 충돌 가능성
+getenforce
+```
+- `Enforcing`: § A-3의 SELinux 처리 같이 보세요
+- `Permissive` 또는 `Disabled`: 그냥 진행
+
+### A-3. SELinux Enforcing 호스트에서 — 두 가지 길
+
+Agent 컨테이너는 `/var/run/docker.sock`, `/proc`, `/var/run/utmp`, `/etc/hostname`을 read-only로 마운트합니다. SELinux Enforcing이면 컨테이너 안 프로세스가 이 파일들을 못 읽어서 Agent가 즉시 종료될 수 있습니다.
+
+**선택 1 (가장 간단, 권장)**: Docker 데몬 SELinux 통합을 끄기
+```bash
+sudo mkdir -p /etc/docker
+echo '{"selinux-enabled": false}' | sudo tee /etc/docker/daemon.json
+sudo systemctl restart docker
+```
+이러면 Docker 컨테이너 자체에서 SELinux 라벨링이 꺼지고, 호스트 SELinux 정책은 그대로 유지됩니다 (다른 RHEL 서비스는 보호 유지).
+
+**선택 2 (정책에 SELinux 끄기 금지면)**: 일시적으로 Permissive
+```bash
+sudo setenforce 0   # 재부팅 시 다시 Enforcing
+```
+영구화하려면 `/etc/selinux/config`의 `SELINUX=permissive`. 다만 보안 정책 위반 가능성 있음 — 보안팀과 합의 필요.
+
+### A-4. (Docker 미설치인 경우) RHEL 8용 Docker .rpm 오프라인 설치
+
+RHEL은 podman이 기본이라 Docker는 별도 설치. 폐쇄망이면 .rpm을 외부망에서 받아 USB로 옮깁니다.
+
+**외부망 PC (CentOS 8 컨테이너 활용)**:
+```bash
+mkdir -p ~/docker-rpms-rhel8 && cd ~/docker-rpms-rhel8
+
+docker run --rm -v "$(pwd):/output" centos:8 bash -c '
+  # CentOS 8 vault repo로 변경 (CentOS 8 EOL이라 기본 repo 안 됨)
+  cd /etc/yum.repos.d/
+  sed -i "s/mirrorlist/#mirrorlist/g" CentOS-*.repo
+  sed -i "s|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g" CentOS-*.repo
+  dnf install -y dnf-plugins-core
+  dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+  dnf install -y --downloadonly --downloaddir=/output \
+    docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  ls -lh /output/
+'
+```
+
+**RHEL 8 호스트에서**:
+```bash
+sudo dnf install -y --disablerepo='*' /mnt/usb/docker-rpms-rhel8/*.rpm
+sudo systemctl enable --now docker
+docker --version
+docker compose version
+```
+
+기존에 podman 깔려 있어 충돌 나면:
+```bash
+sudo dnf remove -y podman buildah skopeo runc
+sudo dnf install -y --disablerepo='*' /mnt/usb/docker-rpms-rhel8/*.rpm
+```
+
+### A-5. 슬림 인스톨러 실행
+
+```bash
+sudo /mnt/usb/hypercube-agent-installer-1.0.0-slim.sh
+```
+
+이후는 일반 가이드와 동일 — 인터랙티브 입력, .env/compose 자동 작성, systemd 등록, 컨테이너 기동.
+
+### A-6. RHEL 8 흔한 문제
+
+| 증상 | 원인 | 해결 |
+|---|---|---|
+| Agent 컨테이너 즉시 Exit | SELinux Enforcing | § A-3 |
+| Backend 닿지 않음 | firewalld 막음 | `sudo firewall-cmd --add-port=8000/tcp --permanent && sudo firewall-cmd --reload` (실 포트로) |
+| `docker compose` 명령 없음 | docker-compose-plugin 누락 | `dnf install` 시 docker-compose-plugin도 같이 |
+| `docker.service` 시작 실패 | iptables-legacy vs nftables | `sudo update-alternatives --config iptables`로 nftables 선택 후 재시작 |
 
 ## 부록 B — NVIDIA Container Toolkit 오프라인 설치 (GPU 호스트만)
 
