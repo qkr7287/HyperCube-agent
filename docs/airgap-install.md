@@ -28,24 +28,24 @@ bash scripts/build-installer.sh
 
 기대 출력 마지막 줄:
 ```
-[OK] Installer built: ...\dist-installer\hypercube-agent-installer-1.0.0.sh (169M)
+[OK] Installer built: ...\dist-installer\hypercube-agent-installer-1.0.0-ubuntu24.sh (169M)
 ```
 
 확인:
 ```powershell
 ls dist-installer/
 ```
-→ `hypercube-agent-installer-1.0.0.sh` 라는 파일이 있어야 합니다.
+→ `hypercube-agent-installer-1.0.0-ubuntu24.sh` 라는 파일이 있어야 합니다.
 
 체크섬도 만들어 두세요 (USB로 옮긴 뒤 깨졌는지 확인용):
 ```powershell
 cd dist-installer
-sha256sum hypercube-agent-installer-1.0.0.sh > hypercube-agent-installer-1.0.0.sh.sha256
-cat hypercube-agent-installer-1.0.0.sh.sha256
+sha256sum hypercube-agent-installer-1.0.0-ubuntu24.sh > hypercube-agent-installer-1.0.0-ubuntu24.sh.sha256
+cat hypercube-agent-installer-1.0.0-ubuntu24.sh.sha256
 ```
 기대 출력 (해시값은 매번 다름):
 ```
-abcd1234...ef9876  hypercube-agent-installer-1.0.0.sh
+abcd1234...ef9876  hypercube-agent-installer-1.0.0-ubuntu24.sh
 ```
 
 ### B. USB에 파일 복사
@@ -54,8 +54,8 @@ USB 메모리를 빌드 PC에 꽂으면 보통 `D:` 또는 `E:` 같은 드라이
 
 ```powershell
 # 예: USB가 E: 드라이브로 잡힌 경우
-cp dist-installer\hypercube-agent-installer-1.0.0.sh E:\
-cp dist-installer\hypercube-agent-installer-1.0.0.sh.sha256 E:\
+cp dist-installer\hypercube-agent-installer-1.0.0-ubuntu24.sh E:\
+cp dist-installer\hypercube-agent-installer-1.0.0-ubuntu24.sh.sha256 E:\
 cp docs\airgap-install.md E:\
 ```
 
@@ -65,8 +65,8 @@ ls E:\
 ```
 세 파일이 보여야 합니다:
 ```
-hypercube-agent-installer-1.0.0.sh           169M
-hypercube-agent-installer-1.0.0.sh.sha256    64B
+hypercube-agent-installer-1.0.0-ubuntu24.sh           169M
+hypercube-agent-installer-1.0.0-ubuntu24.sh.sha256    64B
 airgap-install.md                            ~30KB
 ```
 
@@ -126,8 +126,8 @@ ls -lh /mnt/usb/
 
 기대 출력:
 ```
--rw-r--r-- 1 root root 169M ... hypercube-agent-installer-1.0.0.sh
--rw-r--r-- 1 root root  64B ... hypercube-agent-installer-1.0.0.sh.sha256
+-rw-r--r-- 1 root root 169M ... hypercube-agent-installer-1.0.0-ubuntu24.sh
+-rw-r--r-- 1 root root  64B ... hypercube-agent-installer-1.0.0-ubuntu24.sh.sha256
 -rw-r--r-- 1 root root  30K ... airgap-install.md
 ```
 
@@ -135,12 +135,12 @@ ls -lh /mnt/usb/
 
 ```bash
 cd /mnt/usb
-sha256sum -c hypercube-agent-installer-1.0.0.sh.sha256
+sha256sum -c hypercube-agent-installer-1.0.0-ubuntu24.sh.sha256
 ```
 
 기대 출력:
 ```
-hypercube-agent-installer-1.0.0.sh: OK
+hypercube-agent-installer-1.0.0-ubuntu24.sh: OK
 ```
 
 `OK` 안 나오면 USB 복사가 손상된 것 — 다시 복사하세요.
@@ -150,21 +150,21 @@ hypercube-agent-installer-1.0.0.sh: OK
 USB는 나중에 빼야 하니, 파일을 서버 본 디스크로 옮깁니다:
 
 ```bash
-cp /mnt/usb/hypercube-agent-installer-1.0.0.sh /root/
-chmod +x /root/hypercube-agent-installer-1.0.0.sh
-ls -lh /root/hypercube-agent-installer-1.0.0.sh
+cp /mnt/usb/hypercube-agent-installer-1.0.0-ubuntu24.sh /root/
+chmod +x /root/hypercube-agent-installer-1.0.0-ubuntu24.sh
+ls -lh /root/hypercube-agent-installer-1.0.0-ubuntu24.sh
 ```
 
 기대 출력:
 ```
--rwxr-xr-x 1 root root 169M ... /root/hypercube-agent-installer-1.0.0.sh
+-rwxr-xr-x 1 root root 169M ... /root/hypercube-agent-installer-1.0.0-ubuntu24.sh
 ```
 앞에 `-rwxr-xr-x`처럼 `x`가 보이면 실행 가능 상태.
 
 ### G. 인스톨러 실행
 
 ```bash
-sudo /root/hypercube-agent-installer-1.0.0.sh
+sudo /root/hypercube-agent-installer-1.0.0-ubuntu24.sh
 ```
 
 화면에 다음과 비슷한 출력이 나옵니다:
@@ -341,7 +341,7 @@ bash scripts/build-installer.sh
 
 # 산출물
 ls dist-installer/
-# → hypercube-agent-installer-1.0.0.sh   (~169MB)
+# → hypercube-agent-installer-1.0.0-ubuntu24.sh   (~169MB)
 ```
 
 이 한 파일에 다음이 모두 들어 있습니다:
@@ -368,7 +368,7 @@ build-installer.sh가 이 디렉터리에 캐시된 .deb를 자동으로 재사�
 ## 4. USB로 반입
 
 ```bash
-cp dist-installer/hypercube-agent-installer-1.0.0.sh /media/usb/
+cp dist-installer/hypercube-agent-installer-1.0.0-ubuntu24.sh /media/usb/
 ```
 
 폐쇄망 서버로 옮기고 임의 디렉터리에 둡니다 (예: `/root/`).
@@ -378,7 +378,7 @@ cp dist-installer/hypercube-agent-installer-1.0.0.sh /media/usb/
 ### 인터랙티브 (권장)
 
 ```bash
-sudo ./hypercube-agent-installer-1.0.0.sh
+sudo ./hypercube-agent-installer-1.0.0-ubuntu24.sh
 ```
 
 다음 항목을 차례로 묻습니다:
@@ -422,7 +422,7 @@ sudo HC_BACKEND_URL=ws://10.0.1.20:8000 \
      HC_GPU_ENABLED=y \
      HC_AUTO_START=y \
      HC_ASSUME_YES=1 \
-     ./hypercube-agent-installer-1.0.0.sh
+     ./hypercube-agent-installer-1.0.0-ubuntu24.sh
 ```
 
 | 환경변수 | 값 |
@@ -529,7 +529,7 @@ sudo systemctl is-enabled hypercube-agent   # → enabled
 |---|---|
 | `tar` 없음 | `sudo apt-get install -y tar` |
 | `dpkg` 없음 | 이 서버는 Ubuntu/Debian이 아닌 듯. **빌드 PC로 돌아와** `HC_BUNDLE_DOCKER=0 bash scripts/build-installer.sh`로 슬림 인스톨러 다시 만들고, Docker는 해당 배포판 방식으로 직접 설치 |
-| `Run as root` | 명령어 앞에 `sudo` 붙여서 다시: `sudo /root/hypercube-agent-installer-1.0.0.sh` |
+| `Run as root` | 명령어 앞에 `sudo` 붙여서 다시: `sudo /root/hypercube-agent-installer-1.0.0-ubuntu24.sh` |
 
 **🆘 안 되면:** § 9 진단 번들
 
@@ -736,12 +736,12 @@ docker exec hypercube-agent nvidia-smi 2>&1 | head -5
 
 폐쇄망 서버에서:
 ```bash
-sha256sum /root/hypercube-agent-installer-1.0.0.sh
+sha256sum /root/hypercube-agent-installer-1.0.0-ubuntu24.sh
 ```
 
 **빌드 PC**(인스톨러 만든 곳)에서:
 ```powershell
-sha256sum dist-installer/hypercube-agent-installer-1.0.0.sh
+sha256sum dist-installer/hypercube-agent-installer-1.0.0-ubuntu24.sh
 ```
 
 두 해시가 다르면 → USB 복사 다시 (반드시 바이너리 모드, FTP면 `binary` 명령). 같으면 빌드 자체가 깨진 것 → 빌드 PC에서 `bash scripts/build-installer.sh` 다시.
@@ -918,9 +918,9 @@ USB 빼서 빌드 PC에 꽂은 뒤, 그 .tar.gz 파일을 알려주세요 (메�
 
 ```bash
 # 1. 인스톨러 안의 payload만 추출 (이미지 + .deb)
-LINE=$(grep -an '^__PAYLOAD_BELOW__$' hypercube-agent-installer-1.0.0.sh | head -1 | cut -d: -f1)
+LINE=$(grep -an '^__PAYLOAD_BELOW__$' hypercube-agent-installer-1.0.0-ubuntu24.sh | head -1 | cut -d: -f1)
 mkdir -p /tmp/hc-manual
-tail -n +$((LINE+1)) hypercube-agent-installer-1.0.0.sh | tar x -C /tmp/hc-manual
+tail -n +$((LINE+1)) hypercube-agent-installer-1.0.0-ubuntu24.sh | tar x -C /tmp/hc-manual
 
 # 2. (필요 시) Docker 수동 설치
 sudo dpkg -i /tmp/hc-manual/docker-debs/*.deb
@@ -993,13 +993,9 @@ git checkout main && git pull
 HC_BUNDLE_DOCKER=0 bash scripts/build-installer.sh
 ```
 
-산출물: `dist-installer/hypercube-agent-installer-<version>.sh` (~84MB).
+산출물: `dist-installer/hypercube-agent-installer-<version>-slim.sh` (~84MB).
 
-> **주의**: 같은 파일명으로 덮어씁니다. Ubuntu용 풀 인스톨러(169MB)도 같은 이름이라 헷갈리니, 슬림으로 빌드한 직후엔 별도 이름으로 복사해두는 걸 권장:
-> ```bash
-> cp dist-installer/hypercube-agent-installer-1.0.0.sh \
->    dist-installer/hypercube-agent-installer-1.0.0-slim.sh
-> ```
+빌드 스크립트가 `HC_BUNDLE_DOCKER` 값에 따라 파일명을 자동 분리하므로 풀 번들(`-ubuntu24.sh`)과 슬림(`-slim.sh`)이 같은 디렉터리에 공존할 수 있습니다 — 덮어쓰기 걱정 없음.
 
 ### A-2. RHEL 8 호스트 사전 점검
 
@@ -1153,7 +1149,7 @@ ssh root@localhost -p 2223      # password: hypercube
 # 안에서
 which docker                     # not installed
 ping -c 1 -W 2 google.com        # blocked
-sudo /root/hypercube-agent-installer-1.0.0.sh
+sudo /root/hypercube-agent-installer-1.0.0-ubuntu24.sh
 ```
 
 종료:
