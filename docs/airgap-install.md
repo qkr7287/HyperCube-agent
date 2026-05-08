@@ -6,13 +6,13 @@
 
 - **처음 해보는 사람**: [§ 따라하기](#따라하기--처음부터-끝까지)부터. 명령어 그대로 복붙하면 끝납니다.
 - **이미 익숙한 사람**: [§ 0. 흐름 한눈에](#0-흐름-한눈에)부터 순서대로.
-- **문제 생긴 사람**: [§ 7. 트러블슈팅](#7-트러블슈팅) + [§ 8. 진단 번들](#8-진단-번들-한-방에-만들기).
+- **문제 생긴 사람**: [§ 8. 트러블슈팅](#8-트러블슈팅) + [§ 9. 진단 번들](#9-진단-번들-한-방에-만들기).
 
 ---
 
 ## 따라하기 — 처음부터 끝까지
 
-Linux를 잘 몰라도 됩니다. **명령어를 그대로 복붙**하시면 됩니다. 각 명령어 아래 **"기대 출력"** 이 적혀 있으니 비슷하게 나오면 다음 단계로 넘어가세요. 다르면 [§ 7](#7-트러블슈팅)이나 [§ 8 진단 번들](#8-진단-번들-한-방에-만들기)을 보고 그 결과를 저(빌드 PC)에게 가져오세요.
+Linux를 잘 몰라도 됩니다. **명령어를 그대로 복붙**하시면 됩니다. 각 명령어 아래 **"기대 출력"** 이 적혀 있으니 비슷하게 나오면 다음 단계로 넘어가세요. 다르면 [§ 8](#8-트러블슈팅)이나 [§ 9 진단 번들](#9-진단-번들-한-방에-만들기)을 보고 그 결과를 저(빌드 PC)에게 가져오세요.
 
 ### A. 빌드 PC에서 — 인스톨러 만들기 (이미 끝났으면 건너뛰기)
 
@@ -215,7 +215,7 @@ CONTAINER ID   IMAGE                   STATUS         NAMES
 xxxxxxx        hypercube-agent:1.0.0   Up 30 seconds  hypercube-agent
 ```
 
-`Up xx seconds` 나오면 OK. `Exited` 나오면 § 7.5 참고.
+`Up xx seconds` 나오면 OK. `Exited` 나오면 § 8.5 참고.
 
 ```bash
 # 2. 로그에 정상 메시지 보이는지 (5초 정도 보고 Ctrl+C로 빠져나오기)
@@ -255,7 +255,7 @@ SSH 세션 끝내려면:
 exit
 ```
 
-**여기까지가 정상 흐름**입니다. 어디선가 막히면 § 7~8 보고 진단 번들을 만들어 빌드 PC로 가져오세요.
+**여기까지가 정상 흐름**입니다. 어디선가 막히면 § 8~9 보고 진단 번들을 만들어 빌드 PC로 가져오세요.
 
 ---
 
@@ -273,29 +273,64 @@ exit
                                                 Agent 컨테이너 기동
 ```
 
-## 1. 폐쇄망 서버 사전 조건
+## 1. 어떤 인스톨러를 가져가야 하나? (먼저 읽기)
 
-타겟이 **Ubuntu 24.04 LTS amd64**라면 다음만 있으면 됩니다.
+폐쇄망 서버의 **OS와 Docker 설치 상태**에 따라 가져갈 게 다릅니다. 표에서 본인 시나리오 찾으세요.
+
+| 타겟 OS | Docker 설치됨? | 가져갈 인스톨러 | 빌드 명령 (빌드 PC에서) | 추가 USB 파일 |
+|---|---|---|---|---|
+| **Ubuntu 24.04 amd64** | ❌ 없음 | **풀 번들** (~169MB) | `bash scripts/build-installer.sh` | 없음 |
+| **Ubuntu 24.04 amd64** | ✅ 있음 | 풀 번들 또는 슬림 | (위 또는 `HC_BUNDLE_DOCKER=0 ...`) | 없음 |
+| **Ubuntu 22.04 / 20.04** | 어느 쪽이든 | **슬림** + 22.04용 .deb 별도 | `HC_BUNDLE_DOCKER=0 bash scripts/build-installer.sh` | Docker .deb 묶음 (수동) |
+| **RHEL/Rocky/Alma 8** | ✅ 있음 | **슬림** (~84MB) | `HC_BUNDLE_DOCKER=0 bash scripts/build-installer.sh` | 없음 |
+| **RHEL/Rocky/Alma 8** | ❌ 없음 | **슬림** + RHEL용 .rpm 별도 | `HC_BUNDLE_DOCKER=0 ...` | Docker .rpm 묶음 (§ 부록 A-4) |
+| **그 외 (Debian/SUSE/Arch)** | ✅ 있음 | **슬림** | `HC_BUNDLE_DOCKER=0 ...` | 없음 |
+| **그 외** | ❌ 없음 | **슬림** | `HC_BUNDLE_DOCKER=0 ...` | 배포판 방식으로 Docker 사전 설치 필요 |
+
+**한 줄 요약**:
+- **Ubuntu 24.04 + Docker 없음** → 풀 번들 하나면 끝 (인스톨러가 Docker도 깔아줌)
+- **그 외 모든 경우** → 슬림 + Docker는 호스트에 미리 깔려 있어야 함
+
+> **풀 번들이란?** Agent 이미지 + Ubuntu 24.04용 Docker .deb까지 한 파일에 들어 있는 169MB 인스톨러. **Ubuntu 24.04 amd64 전용**. 다른 배포판/버전엔 안 맞음 (.deb 호환성 문제).
+>
+> **슬림이란?** Agent 이미지만 들어 있는 84MB 인스톨러. **Docker가 호스트에 이미 있어야** 동작. 모든 Linux 배포판에서 작동.
+
+## 2. 폐쇄망 서버 사전 조건
+
+### 모든 시나리오 공통 (필수)
 
 | 도구 | 확인 명령 | 비고 |
 |---|---|---|
-| `bash` | `bash --version` | 5.x — Ubuntu 기본 |
-| `tar` | `tar --version` | Ubuntu 기본 (Essential 패키지) |
-| `dpkg` | `dpkg --version` | Debian 계열 기본 |
-| `systemd` | `systemctl --version` | Ubuntu 기본 (부팅 시 자동 시작용) |
+| `bash` | `bash --version` | 5.x — 모든 주요 배포판 기본 |
+| `tar` | `tar --version` | 모든 주요 배포판 기본 |
+| `systemd` | `systemctl --version` | 부팅 시 자동 시작용 (없으면 수동 시작 가능) |
+| `root` 또는 `sudo` | — | 필수 |
 
-**없어도 인스톨러가 알아서 까는 것**:
-- Docker Engine
-- docker compose 플러그인
-- containerd, runc, buildx 등 Docker 의존 패키지
+### Docker 사전 설치 필요 여부
 
-**여전히 필요한 것** (Agent가 못 까는 영역):
-- GPU 모니터링 시: NVIDIA 드라이버 + `nvidia-container-toolkit` (호스트 사전 설치)
+위 § 1 표에서 결정됩니다:
 
-권한:
-- `root` 또는 `sudo` 필요
+| 시나리오 | Docker 사전 설치? |
+|---|---|
+| Ubuntu 24.04 + 풀 번들 | **불필요** — 인스톨러가 자동 설치 |
+| 그 외 모든 경우 (슬림 인스톨러) | **필수** — 인스톨러 실행 전 호스트에 Docker + compose 플러그인이 깔려 있어야 함 |
 
-## 2. 빌드 PC (외부망)에서 인스톨러 만들기
+**Docker 사전 설치 검증 명령** (슬림 인스톨러 대상 호스트에서):
+```bash
+docker --version              # 27.x 이상 권장
+docker compose version        # v2.x 이상 — 이거도 꼭 동작해야 함
+sudo systemctl is-active docker   # active
+sudo docker ps                # 권한 OK인지 확인 (에러 없어야 함)
+```
+넷 다 OK여야 슬림 인스톨러 진행 가능. 하나라도 안 되면 § 부록 A (RHEL) 또는 § 부록 D (Ubuntu 22.04 등) 참고해서 Docker 먼저 설치.
+
+### GPU 모니터링 시 추가
+
+- **NVIDIA 드라이버** 호스트 사전 설치 (Agent가 못 깖)
+- **`nvidia-container-toolkit`** 호스트 사전 설치 (§ 부록 B)
+- 둘 다 없으면 GPU 메트릭만 안 잡힐 뿐, 일반 모니터링은 정상 동작
+
+## 3. 빌드 PC (외부망)에서 인스톨러 만들기
 
 ```bash
 git clone https://github.com/qkr7287/hypercube-agent.git
@@ -330,7 +365,7 @@ bash scripts/fetch-docker-debs.sh
 
 build-installer.sh가 이 디렉터리에 캐시된 .deb를 자동으로 재사용합니다. 한 번 받아두면 다음 빌드는 재다운로드 없이 즉시 패킹.
 
-## 3. USB로 반입
+## 4. USB로 반입
 
 ```bash
 cp dist-installer/hypercube-agent-installer-1.0.0.sh /media/usb/
@@ -338,7 +373,7 @@ cp dist-installer/hypercube-agent-installer-1.0.0.sh /media/usb/
 
 폐쇄망 서버로 옮기고 임의 디렉터리에 둡니다 (예: `/root/`).
 
-## 4. 폐쇄망 서버에서 실행
+## 5. 폐쇄망 서버에서 실행
 
 ### 인터랙티브 (권장)
 
@@ -412,7 +447,7 @@ sudo HC_BACKEND_URL=ws://10.0.1.20:8000 \
 
 이미지는 호스트 Docker에 `hypercube-agent:1.0.0` 태그로 로드됩니다.
 
-## 5. 설치 후 확인
+## 6. 설치 후 확인
 
 ### 컨테이너 상태
 
@@ -446,7 +481,7 @@ sudo systemctl status hypercube-agent
 sudo systemctl is-enabled hypercube-agent   # → enabled
 ```
 
-## 6. 일상 운영
+## 7. 일상 운영
 
 | 동작 | 명령 |
 |---|---|
@@ -458,12 +493,12 @@ sudo systemctl is-enabled hypercube-agent   # → enabled
 | 업그레이드 | 새 인스톨러 받아서 그대로 실행 (덮어쓰기) |
 | 제거 | `systemctl stop hypercube-agent && rm -rf /opt/hypercube-agent /etc/systemd/system/hypercube-agent.service && docker rmi hypercube-agent:1.0.0` |
 
-## 7. 트러블슈팅
+## 8. 트러블슈팅
 
 > ### 🚨 막혔을 때 가장 먼저 할 일
-> **무엇이 문제인지 모르겠으면 그냥 [§ 8 진단 번들](#8-진단-번들-한-방에-만들기)을 만들어서 빌드 PC로 가져오세요.** 한 줄 명령으로 모든 정보를 자동으로 수집합니다. 그게 가장 빠릅니다.
+> **무엇이 문제인지 모르겠으면 그냥 [§ 9 진단 번들](#9-진단-번들-한-방에-만들기)을 만들어서 빌드 PC로 가져오세요.** 한 줄 명령으로 모든 정보를 자동으로 수집합니다. 그게 가장 빠릅니다.
 >
-> 아래 케이스별 가이드는 **본인이 직접 해보고 싶을 때**의 참고용입니다. 명령어 의미를 모르면 § 8로 바로 가세요.
+> 아래 케이스별 가이드는 **본인이 직접 해보고 싶을 때**의 참고용입니다. 명령어 의미를 모르면 § 9로 바로 가세요.
 
 ---
 
@@ -472,7 +507,7 @@ sudo systemctl is-enabled hypercube-agent   # → enabled
 - **🖥️ 화면에 보이는 것** — 정확히 이런 메시지가 보이면 이 섹션
 - **❓ 무슨 뜻?** — 한 줄 설명
 - **🔧 빨리 해보기** — 1~3개 단순 명령
-- **🆘 안 되면** — § 8 진단 번들로
+- **🆘 안 되면** — § 9 진단 번들로
 
 ---
 
@@ -496,7 +531,7 @@ sudo systemctl is-enabled hypercube-agent   # → enabled
 | `dpkg` 없음 | 이 서버는 Ubuntu/Debian이 아닌 듯. **빌드 PC로 돌아와** `HC_BUNDLE_DOCKER=0 bash scripts/build-installer.sh`로 슬림 인스톨러 다시 만들고, Docker는 해당 배포판 방식으로 직접 설치 |
 | `Run as root` | 명령어 앞에 `sudo` 붙여서 다시: `sudo /root/hypercube-agent-installer-1.0.0.sh` |
 
-**🆘 안 되면:** § 8 진단 번들
+**🆘 안 되면:** § 9 진단 번들
 
 ---
 
@@ -527,7 +562,7 @@ df -h /var /tmp
 
 위 중 **(1)**에서 noble/amd64 안 나오면 → 이 가이드의 인스톨러 적용 대상이 아닙니다. **빌드 PC**로 와서 알려주세요.
 
-**🆘 안 되면:** § 8 진단 번들
+**🆘 안 되면:** § 9 진단 번들
 
 ---
 
@@ -557,7 +592,7 @@ sudo rm -f /var/run/docker.sock
 sudo systemctl restart docker
 ```
 
-**🆘 안 되면:** § 8 진단 번들 — `/tmp/hc-dockerd.log`가 자동 포함됩니다.
+**🆘 안 되면:** § 9 진단 번들 — `/tmp/hc-dockerd.log`가 자동 포함됩니다.
 
 ---
 
@@ -582,7 +617,7 @@ sudo docker system prune -af
 df -h /var/lib/docker
 ```
 
-**🆘 안 되면:** § 8 진단 번들
+**🆘 안 되면:** § 9 진단 번들
 
 ---
 
@@ -610,7 +645,7 @@ docker inspect hypercube-agent --format '{{.State.Status}}: {{.State.Error}}'
 cd /opt/hypercube-agent && docker compose config >/dev/null && echo "OK"
 ```
 
-**🆘 안 되면:** § 8 진단 번들
+**🆘 안 되면:** § 9 진단 번들
 
 ---
 
@@ -652,7 +687,7 @@ cd /opt/hypercube-agent && sudo docker compose up -d --force-recreate
 
 **ℹ️ 헷갈리기 쉬운 정상 상태:** 로그에 `Registration accepted (status: pending)` 만 보이고 그 뒤가 조용하면 **에러가 아닙니다** — Backend 관리자 페이지에서 **승인** 안 한 상태. § 따라하기 § I 참고.
 
-**🆘 안 되면:** § 8 진단 번들
+**🆘 안 되면:** § 9 진단 번들
 
 ---
 
@@ -684,7 +719,7 @@ docker exec hypercube-agent nvidia-smi 2>&1 | head -5
 `(1)`이 안 되면 → NVIDIA 드라이버가 호스트에 없습니다. (Agent가 깔지 못함 — 부록 B 참조)
 `(1)`은 되는데 `(2)`만 안 되면 → `nvidia-container-toolkit` 누락. 부록 B로.
 
-**🆘 안 되면:** § 8 진단 번들
+**🆘 안 되면:** § 9 진단 번들
 
 ---
 
@@ -711,7 +746,7 @@ sha256sum dist-installer/hypercube-agent-installer-1.0.0.sh
 
 두 해시가 다르면 → USB 복사 다시 (반드시 바이너리 모드, FTP면 `binary` 명령). 같으면 빌드 자체가 깨진 것 → 빌드 PC에서 `bash scripts/build-installer.sh` 다시.
 
-**🆘 안 되면:** § 8 진단 번들
+**🆘 안 되면:** § 9 진단 번들
 
 ---
 
@@ -737,11 +772,11 @@ sudo systemctl status hypercube-agent --no-pager -n 30
 sudo journalctl -u hypercube-agent -n 50 --no-pager
 ```
 
-**🆘 안 되면:** § 8 진단 번들 — systemd journal이 자동 포함됩니다.
+**🆘 안 되면:** § 9 진단 번들 — systemd journal이 자동 포함됩니다.
 
 ---
 
-## 8. 진단 번들 한 방에 만들기
+## 9. 진단 번들 한 방에 만들기
 
 **막혔을 때 본인이 할 일은 딱 두 가지:**
 1. 아래 명령 한 줄 복붙해서 실행 → 작은 .tar.gz 파일 하나 생김
@@ -877,7 +912,7 @@ USB 빼서 빌드 PC에 꽂은 뒤, 그 .tar.gz 파일을 알려주세요 (메�
 
 비밀번호·토큰 같은 민감 정보는 자동 포함되지 않게 만들어졌습니다 (`.env`에서 `BACKEND/AGENT_HOSTNAME/GPU` 라인만 추출).
 
-## 9. 안전 모드 — 인스톨러 없이 직접 손보기
+## 10. 안전 모드 — 인스톨러 없이 직접 손보기
 
 자동 인스톨러가 어떤 이유로든 실패하고 빠른 복구가 필요할 때, 같은 일을 손으로 할 수 있습니다.
 
