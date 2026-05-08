@@ -92,6 +92,103 @@ These are pushed by the Agent on a timer. They do **not** carry `requestId`.
 - **Full snapshot**: every 60s, one message per running container regardless of delta (safety net — idle containers would otherwise expire from Backend Redis cache TTL).
 - On reconnect: immediate full snapshot.
 
+### `container_events` (push on Docker event, batched within 100ms)
+
+Container lifecycle events streamed from the Docker daemon. Sent in batches of 1+ events; multiple events arriving within a 100ms window are coalesced into one message for network efficiency.
+
+```json
+{
+  "type": "container_events",
+  "timestamp": "2026-05-08T11:30:00.000Z",
+  "data": {
+    "events": [
+      {
+        "containerId": "abc123def456...",
+        "name": "verify-redis-2",
+        "ts": "2026-05-08T11:29:58.123Z",
+        "kind": "die",
+        "exitCode": 137
+      }
+    ]
+  }
+}
+```
+
+**Event fields**
+
+| field         | type             | required | notes                                                          |
+|---------------|------------------|----------|----------------------------------------------------------------|
+| containerId   | string           | yes      | full Docker ID (64 chars). Backend matches on 12-char short ID |
+| name          | string           | no       | `Actor.Attributes.name` when present                           |
+| ts            | string (ISO8601) | yes      | Docker `time` field (Unix seconds → ISO8601 UTC)               |
+| kind          | enum             | yes      | see mapping below                                              |
+| exitCode      | number           | no       | included when `kind: "die"`                                    |
+| signal        | string           | no       | included when `kind: "kill"`. Numeric signals normalized to `SIGKILL` etc. when known |
+| healthStatus  | enum             | no       | included when `kind: "health_status"`. `healthy` \| `unhealthy` \| `starting` |
+
+**Action → kind mapping**
+
+| Docker `Action`                | `kind`          | extra                                          |
+|--------------------------------|-----------------|------------------------------------------------|
+| `start`                        | `start`         | —                                              |
+| `stop`                         | `stop`          | —                                              |
+| `die`                          | `die`           | `exitCode`                                     |
+| `restart`                      | `restart`       | —                                              |
+| `pause`                        | `pause`         | —                                              |
+| `unpause`                      | `unpause`       | —                                              |
+| `kill`                         | `kill`          | `signal`                                       |
+| `oom`                          | `oom`           | — (a `die` follows)                            |
+| `health_status: healthy`       | `health_status` | `healthStatus: "healthy"`                      |
+| `health_status: unhealthy`     | `health_status` | `healthStatus: "unhealthy"`                    |
+| `health_status: starting`      | `health_status` | `healthStatus: "starting"`                     |
+
+Other Docker actions (`create`, `destroy`, `exec_*`, `attach`, `commit`, `rename`, `update`, `top`, ...) are dropped to reduce noise.
+
+- **No backfill**: events arriving while the WebSocket is disconnected are lost. Backend owns retention; the agent is stateless on this stream.
+- **Re-subscribe**: on WebSocket reconnect, or when the Docker event stream ends/errors (e.g. daemon restart), the agent re-subscribes after a short backoff (1s → 30s).
+
+### `log_chunk` (push, on demand — see `logs_subscribe`)
+
+Live container log lines pushed to backend while a `logs_subscribe` stream is active. Lines are batched by a 200ms window OR a 50-line threshold (whichever fires first). stdout and stderr are emitted as separate chunks.
+
+```json
+{
+  "type": "log_chunk",
+  "streamId": "<sub-uuid>",
+  "stream": "stdout",
+  "lines": [
+    "2026-05-08T11:30:00.123Z [info] hello",
+    "2026-05-08T11:30:00.456Z [warn] something"
+  ]
+}
+```
+
+| field    | type   | notes                                                                       |
+|----------|--------|-----------------------------------------------------------------------------|
+| streamId | string | echo of the originating `logs_subscribe` `requestId`                        |
+| stream   | enum   | `"stdout"` \| `"stderr"` \| `"mixed"`. Demuxed streams emit pure stdout/stderr; `"mixed"` reserved for tty-mode containers where the stream isn't framed |
+| lines    | array  | newline-stripped strings. Includes Docker timestamp prefix when subscribe `timestamps:true` |
+
+### `log_stream_end` (push, terminal)
+
+Emitted exactly once when an active stream ends naturally — i.e. the container stops, the Docker stream errors, or the agent shuts down. **NOT emitted** for streams ended via `logs_unsubscribe` (the `command_response(ended:true)` is the terminal signal in that case).
+
+```json
+{
+  "type": "log_stream_end",
+  "streamId": "<sub-uuid>",
+  "reason": "container_stopped",
+  "error": null
+}
+```
+
+| reason              | meaning                                                          |
+|---------------------|------------------------------------------------------------------|
+| `container_stopped` | Docker stream ended (container exited / stopped / removed)       |
+| `container_removed` | (reserved — currently emitted as `container_stopped`)            |
+| `stream_error`      | Docker socket read error. `error` field carries the message      |
+| `agent_shutdown`    | Agent process is shutting down gracefully                        |
+
 ---
 
 ## Commands
@@ -410,3 +507,52 @@ Invalid `subCommand` → `"Invalid subCommand: <x>. Valid: cpu_detail, processes
 ```
 
 - Requires `/var/run/utmp` mount in compose. Empty array if not mounted.
+
+---
+
+### 9. `logs_subscribe`
+
+Open a live `docker logs --follow` stream. The `command_response` is sent immediately; log lines are then pushed asynchronously as `log_chunk` messages keyed by `streamId`. The stream ends when the container stops (`log_stream_end`), on `logs_unsubscribe`, on WebSocket reconnect (silent), or on agent shutdown (`log_stream_end reason:"agent_shutdown"`).
+
+`get_logs` (non-streaming, polling) remains available for one-shot fetches.
+
+**params**
+
+| field       | type    | required | default | notes                                                                          |
+|-------------|---------|----------|---------|--------------------------------------------------------------------------------|
+| containerId | string  | yes      |         | full ID or short ID                                                            |
+| tail        | number  | no       | 100     | initial backfill line count. `0` = start from now                              |
+| since       | string  | no       |         | ISO8601 (`"2026-05-08T11:00:00Z"`) OR relative shorthand (`"5m"`, `"1h"`, `"30s"`) |
+| timestamps  | boolean | no       | true    | prepend Docker RFC3339 timestamp to each line                                  |
+
+**success.data**
+
+```json
+{ "streamId": "<sub-uuid>", "subscribed": true }
+```
+
+`streamId` is the originating `requestId` echoed back. All subsequent `log_chunk` and `log_stream_end` messages reference this id.
+
+**errors** — `"containerId is required"`, container not found, Docker errors. On error, no stream is opened.
+
+**streaming follow-on** — see `log_chunk` and `log_stream_end` in *Streaming Messages* above.
+
+---
+
+### 10. `logs_unsubscribe`
+
+Stop an active log stream. **Idempotent**: succeeds even if the streamId doesn't match any active stream (already-ended streams included). Does NOT cause a `log_stream_end` to be emitted — the `command_response` is the only terminal signal.
+
+**params**
+
+| field    | type   | required | notes                                                |
+|----------|--------|----------|------------------------------------------------------|
+| streamId | string | yes      | the `streamId` returned by the originating subscribe |
+
+**success.data**
+
+```json
+{ "ended": true, "streamId": "<sub-uuid>" }
+```
+
+**errors** — `"streamId is required"` (when missing). Unknown streamIds return success (idempotent).

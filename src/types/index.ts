@@ -213,19 +213,79 @@ export interface ContainerNetworkStat {
   timestamp: string | null;
 }
 
+// --- Container Lifecycle Events ---
+
+export type ContainerEventKind =
+  | "start"
+  | "stop"
+  | "die"
+  | "restart"
+  | "pause"
+  | "unpause"
+  | "kill"
+  | "oom"
+  | "health_status";
+
+export type ContainerHealthStatus = "healthy" | "unhealthy" | "starting";
+
+export interface ContainerEvent {
+  containerId: string;
+  name?: string;
+  ts: string;
+  kind: ContainerEventKind;
+  exitCode?: number;
+  signal?: string;
+  healthStatus?: ContainerHealthStatus;
+}
+
 // --- WebSocket Messages ---
 
 export type WsMessageType =
   | "system_metrics"
   | "containers"
   | "container_metrics"
-  | "command_response";
+  | "container_events"
+  | "command_response"
+  | "log_chunk"
+  | "log_stream_end";
 
-export interface WsMessage {
-  type: WsMessageType;
+// Canonical streaming envelope used by metric/snapshot pushes.
+export interface WsEnvelopedMessage {
+  type:
+    | "system_metrics"
+    | "containers"
+    | "container_metrics"
+    | "container_events";
   data: Record<string, unknown>;
   timestamp: string;
 }
+
+export type LogStreamSource = "stdout" | "stderr" | "mixed";
+
+export interface LogChunkMessage {
+  type: "log_chunk";
+  streamId: string;
+  stream: LogStreamSource;
+  lines: string[];
+}
+
+export type LogStreamEndReason =
+  | "container_stopped"
+  | "container_removed"
+  | "stream_error"
+  | "agent_shutdown";
+
+export interface LogStreamEndMessage {
+  type: "log_stream_end";
+  streamId: string;
+  reason: LogStreamEndReason;
+  error?: string;
+}
+
+export type WsMessage =
+  | WsEnvelopedMessage
+  | LogChunkMessage
+  | LogStreamEndMessage;
 
 // --- Commands (Backend → Agent) ---
 
@@ -237,7 +297,9 @@ export type CommandName =
   | "create_container"
   | "delete_container"
   | "compose_up"
-  | "compose_down";
+  | "compose_down"
+  | "logs_subscribe"
+  | "logs_unsubscribe";
 
 export type ProgressStep =
   | "pulling_image"
