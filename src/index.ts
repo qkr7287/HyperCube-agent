@@ -7,6 +7,7 @@ import { DockerEventSubscriber } from "./collectors/docker-events.js";
 import { DeltaEngine } from "./sync/delta.js";
 import { dispatchCommand } from "./handlers/index.js";
 import { LogStreamRegistry } from "./streaming/log-stream-registry.js";
+import { ExecRegistry } from "./streaming/exec-registry.js";
 import { registerAgent } from "./transport/register.js";
 import { AgentWebSocket } from "./transport/websocket.js";
 
@@ -15,6 +16,7 @@ const collectLog = createLogger("collector");
 const abortController = new AbortController();
 let collectTimer: ReturnType<typeof setInterval> | null = null;
 let logRegistryRef: LogStreamRegistry | null = null;
+let execRegistryRef: ExecRegistry | null = null;
 let wsRef: AgentWebSocket | null = null;
 let collecting = false;
 let lastContainersFullSnapshotAt = 0;
@@ -67,6 +69,8 @@ async function main(): Promise<void> {
   const deltaEngine = new DeltaEngine();
   const logRegistry = new LogStreamRegistry((msg) => ws.send(msg));
   logRegistryRef = logRegistry;
+  const execRegistry = new ExecRegistry((msg) => ws.send(msg));
+  execRegistryRef = execRegistry;
 
   let eventSubscriber: DockerEventSubscriber | null = null;
   const startEventSubscriber = (): void => {
@@ -107,14 +111,18 @@ async function main(): Promise<void> {
         });
       },
       logRegistry,
+      execRegistry,
+      config,
+      token,
     );
   };
 
-  // WS disconnect → clean up all active log streams. Browser owns
-  // re-subscribe responsibility per spec; chunks emitted while disconnected
-  // would be dropped by ws.send anyway.
+  // WS disconnect → clean up all active streams. Browser owns re-subscribe
+  // responsibility per spec; chunks emitted while disconnected would be
+  // dropped by ws.send anyway.
   ws.onClose = () => {
     logRegistry.closeAll(null);
+    void execRegistry.closeAll(null);
   };
 
   // initial connection with retry
@@ -292,9 +300,14 @@ function shutdown(signal: string): void {
   if (logRegistryRef) {
     logRegistryRef.closeAll("agent_shutdown");
   }
-  // Give the socket ~150ms to flush log_stream_end frames before tearing
-  // down. Without this the SIGTERM → process.exit race drops the final
-  // batch on the floor.
+  if (execRegistryRef) {
+    // exec_end reason enum has no agent_shutdown; "kill" is the closest
+    // forced-termination signal the browser knows about.
+    void execRegistryRef.closeAll("kill");
+  }
+  // Give the socket ~150ms to flush log_stream_end / exec_end frames before
+  // tearing down. Without this the SIGTERM → process.exit race drops the
+  // final batch on the floor.
   setTimeout(() => {
     try {
       wsRef?.close();

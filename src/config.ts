@@ -39,6 +39,8 @@ export function loadConfig(): AppConfig {
     dcgmExporterUrl: dcgmRaw && dcgmRaw.length > 0 ? dcgmRaw : null,
     gpuPerContainerEnabled:
       (process.env.GPU_PER_CONTAINER_ENABLED ?? "true").toLowerCase() !== "false",
+    modelCacheRoot:
+      process.env.MODEL_CACHE_ROOT?.trim() || "/var/lib/hypercube-agent/model-cache",
   };
 }
 

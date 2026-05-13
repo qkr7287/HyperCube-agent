@@ -1,21 +1,31 @@
 import type Dockerode from "dockerode";
 import { createLogger } from "../logger.js";
-import type { CommandRequest, CommandResponse, ProgressEmitter } from "../types/index.js";
+import type {
+  AppConfig,
+  CommandRequest,
+  CommandResponse,
+  ProgressEmitter,
+} from "../types/index.js";
 import type { LogStreamRegistry } from "../streaming/log-stream-registry.js";
+import type { ExecRegistry } from "../streaming/exec-registry.js";
 import { handleGetLogs } from "./logs.js";
 import { handleInspect } from "./inspect.js";
 import { handleControl } from "./control.js";
 import { handleSystemInfo } from "./system-info.js";
 import { handleCreateContainer } from "./create-container.js";
+import { handleImageInspect } from "./image-inspect.js";
+import { handlePrepareModelAssets } from "./prepare-model-assets.js";
 import { handleDeleteContainer } from "./delete-container.js";
 import { handleComposeUp } from "./compose-up.js";
 import { handleComposeDown } from "./compose-down.js";
+import { handleContainerProcesses } from "./container-processes.js";
 
 const log = createLogger("dispatcher");
 
 const DOCKER_COMMANDS = new Set([
   "get_logs",
   "inspect",
+  "image_inspect",
   "control",
   "create_container",
   "delete_container",
@@ -23,6 +33,11 @@ const DOCKER_COMMANDS = new Set([
   "compose_down",
   "logs_subscribe",
   "logs_unsubscribe",
+  "container_processes",
+  "exec_open",
+  "exec_input",
+  "exec_resize",
+  "exec_close",
 ]);
 
 export async function dispatchCommand(
@@ -30,6 +45,9 @@ export async function dispatchCommand(
   request: CommandRequest,
   emitProgress: ProgressEmitter,
   logRegistry: LogStreamRegistry,
+  execRegistry: ExecRegistry,
+  config: AppConfig,
+  agentToken: string,
 ): Promise<CommandResponse> {
   const { requestId, command, params } = request;
 
@@ -54,6 +72,9 @@ export async function dispatchCommand(
       case "inspect":
         data = await handleInspect(docker!, params);
         break;
+      case "image_inspect":
+        data = await handleImageInspect(docker!, params);
+        break;
       case "control":
         data = await handleControl(docker!, params);
         break;
@@ -61,7 +82,10 @@ export async function dispatchCommand(
         data = await handleSystemInfo(params);
         break;
       case "create_container":
-        data = await handleCreateContainer(docker!, params, emitProgress);
+        data = await handleCreateContainer(docker!, params, emitProgress, config);
+        break;
+      case "prepare_model_assets":
+        data = await handlePrepareModelAssets(config, agentToken, requestId, params, emitProgress);
         break;
       case "delete_container":
         data = await handleDeleteContainer(docker!, params);
@@ -71,6 +95,9 @@ export async function dispatchCommand(
         break;
       case "compose_down":
         data = await handleComposeDown(docker!, params);
+        break;
+      case "container_processes":
+        data = await handleContainerProcesses(docker!, config, params);
         break;
       case "logs_subscribe": {
         const result = await logRegistry.start(docker!, requestId, params);
@@ -109,6 +136,101 @@ export async function dispatchCommand(
           requestId,
           success: true,
           data: { ended: true, streamId },
+        };
+      }
+      case "exec_open": {
+        const result = await execRegistry.start(docker!, requestId, params);
+        if (!result.success) {
+          return {
+            type: "command_response",
+            requestId,
+            success: false,
+            error: result.error ?? "exec_open failed",
+          };
+        }
+        log.info(`Command ${command} completed (${requestId})`);
+        return {
+          type: "command_response",
+          requestId,
+          success: true,
+          data: result.data as unknown as Record<string, unknown>,
+        };
+      }
+      case "exec_input": {
+        const execId = (params as { execId?: unknown }).execId;
+        const data = (params as { data?: unknown }).data;
+        if (typeof execId !== "string" || execId.length === 0) {
+          return {
+            type: "command_response",
+            requestId,
+            success: false,
+            error: "execId is required",
+          };
+        }
+        if (typeof data !== "string") {
+          return {
+            type: "command_response",
+            requestId,
+            success: false,
+            error: "data is required (base64 string)",
+          };
+        }
+        const result = execRegistry.write(execId, data);
+        return {
+          type: "command_response",
+          requestId,
+          success: result.success,
+          data: result.data as unknown as Record<string, unknown> | undefined,
+          error: result.error,
+        };
+      }
+      case "exec_resize": {
+        const execId = (params as { execId?: unknown }).execId;
+        const cols = (params as { cols?: unknown }).cols;
+        const rows = (params as { rows?: unknown }).rows;
+        if (typeof execId !== "string" || execId.length === 0) {
+          return {
+            type: "command_response",
+            requestId,
+            success: false,
+            error: "execId is required",
+          };
+        }
+        if (typeof cols !== "number" || typeof rows !== "number") {
+          return {
+            type: "command_response",
+            requestId,
+            success: false,
+            error: "cols and rows are required (numbers)",
+          };
+        }
+        const result = await execRegistry.resize(execId, cols, rows);
+        return {
+          type: "command_response",
+          requestId,
+          success: result.success,
+          data: result.data as unknown as Record<string, unknown> | undefined,
+          error: result.error,
+        };
+      }
+      case "exec_close": {
+        const execId = (params as { execId?: unknown }).execId;
+        if (typeof execId !== "string" || execId.length === 0) {
+          return {
+            type: "command_response",
+            requestId,
+            success: false,
+            error: "execId is required",
+          };
+        }
+        // User/UI-initiated close → reason="kill". Idempotent.
+        const result = await execRegistry.stop(execId, "kill");
+        log.info(`Command ${command} completed (${requestId})`);
+        return {
+          type: "command_response",
+          requestId,
+          success: true,
+          data: result.data as unknown as Record<string, unknown>,
         };
       }
       default:

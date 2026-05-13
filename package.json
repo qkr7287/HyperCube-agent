@@ -7,7 +7,8 @@
     "dev": "tsx --env-file=.env src/index.ts",
     "build": "tsc",
     "start": "node --env-file=.env dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "self-test:network-policy": "npm run build && node dist/self-tests/create-container-network-policy.js"
   },
   "dependencies": {
     "dockerode": "^4.0.4",

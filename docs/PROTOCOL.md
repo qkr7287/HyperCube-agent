@@ -306,6 +306,17 @@ Create and start a single container. Emits `command_progress` events during imag
 | volumes        | array   | no       | `[]`               | `[{ host, container, mode? }]`             |
 | restart_policy | string  | no       | `"unless-stopped"` | Docker restart policy name                 |
 | pull_if_missing| boolean | no       | `true`             | pull image if not present locally          |
+| gpus           | array   | no       | `[]`               | ML workspace GPU/MIG device requests       |
+| modelMounts    | array   | no       | `[]`               | verified model cache mounts                |
+| workspace      | object  | no       |                    | Jupyter env/base URL/port metadata         |
+| networkPolicy  | string  | no       | `"none"`           | `none`, `internal_only`, or `host`         |
+
+`networkPolicy` behavior:
+
+- missing, empty, or `"none"` keeps the previous Docker networking behavior.
+- `"internal_only"` ensures Docker network `hc-ml-internal` exists with `Internal: true`, attaches the created container only to that network, and keeps explicit/Jupyter port publishing so the existing HyperCube workspace access path can reach Jupyter.
+- `"host"` intentionally uses Docker host network mode. Explicit `ports` are rejected because host networking cannot use Docker port publishing.
+- Other explicit values are rejected with `supported: none, internal_only, host`.
 
 **success.data**
 
@@ -321,6 +332,27 @@ Create and start a single container. Emits `command_progress` events during imag
 **progress steps**: `pulling_image` (per-layer aggregated percent) → `creating` → `starting`.
 
 **errors** — `"image is required"`, `"name is required"`, `"name already exists: <name>"`, `"image pull failed: <reason>"`, `"create failed: <reason>"`, `"start failed: <reason>"`.
+
+Unsupported explicit `networkPolicy` values fail with
+`networkPolicy <value> is not supported by this agent. supported: none, internal_only, host`.
+
+`internal_only` deployment smoke checks:
+
+```bash
+docker network inspect hc-ml-internal --format '{{.Internal}} {{.Driver}}'
+docker inspect <container> --format '{{.HostConfig.NetworkMode}} {{json .NetworkSettings.Networks}}'
+
+if docker exec <container> python3 - <<'PY'
+import socket
+socket.create_connection(("1.1.1.1", 443), timeout=5)
+PY
+then
+  echo "FAIL: public egress is reachable"
+  exit 1
+else
+  echo "PASS: public egress is blocked"
+fi
+```
 
 ---
 
@@ -556,3 +588,57 @@ Stop an active log stream. **Idempotent**: succeeds even if the streamId doesn't
 ```
 
 **errors** — `"streamId is required"` (when missing). Unknown streamIds return success (idempotent).
+
+---
+
+### 11. `container_processes`
+
+Top-N processes inside a container, sorted by CPU or memory. Works on minimal images (no `ps` inside the container required) — agent observes via host `/proc` and `dockerode container.top()`.
+
+**params**
+
+| field       | type   | required | default | notes                                            |
+|-------------|--------|----------|---------|--------------------------------------------------|
+| containerId | string | yes      |         | full ID or short ID                              |
+| sortBy      | string | no       | `"cpu"` | `cpu` \| `mem`. Other values silently fall back to `cpu` |
+| limit       | number | no       | 20      | clamped to `[1, 100]`. NaN/missing → default     |
+
+**success.data**
+
+```json
+{
+  "containerId": "abc123def456",
+  "total": 42,
+  "processes": [
+    {
+      "pid": 1234,
+      "name": "redis-server",
+      "command": "redis-server *:6379",
+      "cpu_percent": 1.2,
+      "memory_rss": 12582912,
+      "state": "S",
+      "user": "999"
+    }
+  ]
+}
+```
+
+| field       | type   | notes                                                                                  |
+|-------------|--------|----------------------------------------------------------------------------------------|
+| containerId | string | always returned as the 12-char short ID                                                |
+| total       | number | full process count inside the container (before `limit` is applied)                    |
+| pid         | number | host PID (agent runs with `pid: host`)                                                 |
+| name        | string | `/proc/<pid>/comm` (15-char limit), falls back to first cmdline token                  |
+| command     | string | full cmdline, NULLs replaced with spaces. Empty for kernel threads — `comm` then used  |
+| cpu_percent | number | `Δ(utime+stime) / clk_tck / Δwall * 100` (cores summed; 4-core fully busy = 400). Sampled 100ms apart |
+| memory_rss  | number | `/proc/<pid>/status` `VmRSS` × 1024, in bytes                                          |
+| state       | string | `/proc/<pid>/stat` state code: `R` running, `S` sleep, `D` uninterruptible, `Z` zombie, `T` stopped, `I` idle |
+| user        | string | real `Uid` from `/proc/<pid>/status`. Username resolution not attempted (uid string)   |
+
+**errors** — `"containerId is required"`, `"container_not_found"` (404 from Docker), `"container_not_running"` (state ≠ Running), `"permission_denied"` (host `/proc` not readable). Other Docker / fs errors propagate verbatim.
+
+**Implementation notes**
+
+- PID enumeration: tries `container.top()` first (image-agnostic — daemon runs host `ps` against the container's pid namespace; `ps` is never invoked inside the container). Falls back to scanning `/host/proc/<pid>/cgroup` for the container ID when `top()` fails (paused containers, daemon errors).
+- CPU sampling holds the dispatcher for ~100ms by design. Concurrent calls are safe but each pays this cost.
+- Sort tie-breaker: ascending PID (stable order across calls).

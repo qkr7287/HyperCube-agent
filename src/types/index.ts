@@ -10,6 +10,7 @@ export interface AppConfig {
   hostProcPath: string;
   dcgmExporterUrl: string | null;
   gpuPerContainerEnabled: boolean;
+  modelCacheRoot: string;
 }
 
 // --- System Metrics ---
@@ -247,7 +248,9 @@ export type WsMessageType =
   | "container_events"
   | "command_response"
   | "log_chunk"
-  | "log_stream_end";
+  | "log_stream_end"
+  | "exec_chunk"
+  | "exec_end";
 
 // Canonical streaming envelope used by metric/snapshot pushes.
 export interface WsEnvelopedMessage {
@@ -282,35 +285,73 @@ export interface LogStreamEndMessage {
   error?: string;
 }
 
+export type ExecChunkSource = "stdout" | "stderr";
+
+export interface ExecChunkMessage {
+  type: "exec_chunk";
+  execId: string;
+  stream: ExecChunkSource;
+  // base64-encoded raw bytes (binary safe; UTF-8, ANSI escape, Ctrl keys).
+  data: string;
+}
+
+export type ExecEndReason =
+  | "natural"
+  | "kill"
+  | "container_stopped"
+  | "error"
+  | "browser_disconnect";
+
+export interface ExecEndMessage {
+  type: "exec_end";
+  execId: string;
+  // null for detach / TTY exits without a recoverable exit code.
+  exitCode: number | null;
+  reason: ExecEndReason;
+  error?: string;
+}
+
 export type WsMessage =
   | WsEnvelopedMessage
   | LogChunkMessage
-  | LogStreamEndMessage;
+  | LogStreamEndMessage
+  | ExecChunkMessage
+  | ExecEndMessage;
 
 // --- Commands (Backend → Agent) ---
 
 export type CommandName =
   | "get_logs"
   | "inspect"
+  | "image_inspect"
   | "control"
   | "system_info"
   | "create_container"
+  | "prepare_model_assets"
   | "delete_container"
   | "compose_up"
   | "compose_down"
   | "logs_subscribe"
-  | "logs_unsubscribe";
+  | "logs_unsubscribe"
+  | "container_processes"
+  | "exec_open"
+  | "exec_input"
+  | "exec_resize"
+  | "exec_close";
 
 export type ProgressStep =
   | "pulling_image"
   | "creating"
   | "starting"
-  | "running_check";
+  | "running_check"
+  | "preparing_model_assets"
+  | "verifying_model_assets";
 
 export interface CommandProgress {
   type: "command_progress";
   requestId: string;
   step: ProgressStep;
+  phase?: string;
   percent: number | null;
   message: string;
   context?: Record<string, unknown>;
@@ -347,7 +388,9 @@ export type SystemInfoSubCommand =
   | "processes"
   | "network_detail"
   | "users"
-  | "users_history";
+  | "users_history"
+  | "capabilities"
+  | "gpu_inventory";
 
 // --- Agent Registration ---
 
