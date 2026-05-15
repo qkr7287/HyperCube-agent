@@ -13,6 +13,9 @@ services:
       - /proc:/host/proc:ro
       - /var/run/utmp:/var/run/utmp:ro
       - /etc/hostname:/host/etc/hostname:ro
+      - /etc/os-release:/host/etc/os-release:ro
+      - /dev:/dev
+      - /var/lib/hypercube/workspaces:/var/lib/hypercube/workspaces:rshared
     group_add:
       - "${DOCKER_GID:-999}"
     # Cap json-file growth at 20MB x 10 = 200MB per container. Without this
