@@ -10,6 +10,8 @@ const DISK_THRESHOLD = 1;
 const CONTAINER_CPU_THRESHOLD = 2;
 const CONTAINER_NETWORK_RATE_THRESHOLD = 1;
 const CONTAINER_GPU_USAGE_THRESHOLD = 2;
+const CONTAINER_WORKSPACE_USAGE_GB_THRESHOLD = 1;
+const CONTAINER_WORKSPACE_USAGE_PCT_THRESHOLD = 1;
 // Bytes (matches GpuPerContainer.memoryUsed units after the contract bump).
 // 1 MiB — small enough to catch real allocation moves, large enough to ignore
 // per-cycle jitter in the driver's reported counts.
@@ -122,6 +124,7 @@ export class DeltaEngine {
       if (
         Math.abs(prev.cpu.usage - metrics.cpu.usage) >= CONTAINER_CPU_THRESHOLD ||
         hasContainerNetworkChanged(prev, metrics) ||
+        hasContainerWorkspaceChanged(prev, metrics) ||
         hasContainerGpuChanged(prev, metrics)
       ) {
         changed[id] = metrics;
@@ -187,6 +190,26 @@ function hasNullableRateChanged(prev: number | null, current: number | null): bo
   if (prev === current) return false;
   if (prev === null || current === null) return true;
   return Math.abs(prev - current) >= CONTAINER_NETWORK_RATE_THRESHOLD;
+}
+
+function hasContainerWorkspaceChanged(
+  prev: ContainerMetrics,
+  current: ContainerMetrics,
+): boolean {
+  if (!prev.workspace && !current.workspace) return false;
+  if (!prev.workspace || !current.workspace) return true;
+
+  return (
+    prev.workspace.device !== current.workspace.device ||
+    prev.workspace.mountPoint !== current.workspace.mountPoint ||
+    prev.workspace.sizeGb !== current.workspace.sizeGb ||
+    Math.abs(prev.workspace.usedGb - current.workspace.usedGb) >=
+      CONTAINER_WORKSPACE_USAGE_GB_THRESHOLD ||
+    Math.abs(prev.workspace.availableGb - current.workspace.availableGb) >=
+      CONTAINER_WORKSPACE_USAGE_GB_THRESHOLD ||
+    Math.abs(prev.workspace.usedPct - current.workspace.usedPct) >=
+      CONTAINER_WORKSPACE_USAGE_PCT_THRESHOLD
+  );
 }
 
 function hasContainerGpuChanged(
