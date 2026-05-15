@@ -19,6 +19,7 @@ import { handleDeleteContainer } from "./delete-container.js";
 import { handleComposeUp } from "./compose-up.js";
 import { handleComposeDown } from "./compose-down.js";
 import { handleContainerProcesses } from "./container-processes.js";
+import { collectHostCapacity } from "../collectors/capacity.js";
 
 const log = createLogger("dispatcher");
 
@@ -76,10 +77,13 @@ export async function dispatchCommand(
         data = await handleImageInspect(docker!, params);
         break;
       case "control":
-        data = await handleControl(docker!, params);
+        data = await handleControl(docker!, params, config);
         break;
       case "system_info":
         data = await handleSystemInfo(params);
+        break;
+      case "request_capacity":
+        data = await collectHostCapacity(config) as unknown as Record<string, unknown>;
         break;
       case "create_container":
         data = await handleCreateContainer(docker!, params, emitProgress, config);
@@ -88,7 +92,7 @@ export async function dispatchCommand(
         data = await handlePrepareModelAssets(config, agentToken, requestId, params, emitProgress);
         break;
       case "delete_container":
-        data = await handleDeleteContainer(docker!, params);
+        data = await handleDeleteContainer(docker!, params, config);
         break;
       case "compose_up":
         data = await handleComposeUp(docker!, params, emitProgress);
@@ -223,7 +227,7 @@ export async function dispatchCommand(
             error: "execId is required",
           };
         }
-        // User/UI-initiated close → reason="kill". Idempotent.
+        // User/UI-initiated close ??reason="kill". Idempotent.
         const result = await execRegistry.stop(execId, "kill");
         log.info(`Command ${command} completed (${requestId})`);
         return {
