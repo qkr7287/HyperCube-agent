@@ -1,6 +1,12 @@
 import type Dockerode from "dockerode";
 import { createLogger } from "../logger.js";
 import {
+  LvmWorkspaceManager,
+  labelsForPreparedWorkspace,
+  normalizeLvmWorkspaceRequest,
+  type PreparedLvmWorkspace,
+} from "../workspace-lvm.js";
+import {
   INTERNAL_NETWORK_NAME,
   type NetworkPolicy,
   normalizeNetworkPolicy,
@@ -30,11 +36,14 @@ interface CreateParams {
   env?: Record<string, string>;
   ports?: PortBinding[];
   volumes?: VolumeBinding[];
+  labels?: Record<string, string>;
   restart_policy?: string;
   pull_if_missing?: boolean;
   gpus?: GpuRequest[];
   modelMounts?: ModelMountRequest[];
   workspace?: WorkspaceParams;
+  sharedMounts?: SharedMountRequest[];
+  hostConfig?: HostConfigParams;
   networkPolicy?: unknown;
 }
 
@@ -48,6 +57,8 @@ interface WorkspaceParams {
   token?: string;
   port?: number;
   baseUrl?: string;
+  sizeGb?: number;
+  mountTarget?: string;
 }
 
 interface ModelMountRequest {
@@ -56,10 +67,26 @@ interface ModelMountRequest {
   readOnly?: boolean;
 }
 
+interface SharedMountRequest {
+  source?: string;
+  target?: string;
+  readOnly?: boolean;
+}
+
+interface HostConfigParams {
+  memory?: number;
+  memorySwap?: number;
+  cpuQuota?: number;
+  cpuPeriod?: number;
+  oomKillDisable?: boolean;
+}
+
 interface BuildCreateExtras {
   env?: Record<string, string>;
   ports?: PortBinding[];
   volumes?: VolumeBinding[];
+  labels?: Record<string, string>;
+  hostConfig?: HostConfigParams;
   deviceRequests?: Dockerode.DeviceRequest[];
   network?: NetworkCreateExtras;
 }
@@ -76,11 +103,17 @@ interface WorkspaceCreateInfo {
   baseUrl: string;
 }
 
+interface CreateContainerDeps {
+  workspaceManager?: LvmWorkspaceManager;
+  workspaceId?: () => string;
+}
+
 export async function handleCreateContainer(
   docker: Dockerode,
   params: Record<string, unknown>,
   emitProgress: ProgressEmitter,
   config: AppConfig,
+  deps: CreateContainerDeps = {},
 ): Promise<Record<string, unknown>> {
   const p = params as unknown as CreateParams;
   if (!p.image) throw new Error("image is required");
@@ -88,6 +121,7 @@ export async function handleCreateContainer(
 
   const networkPolicy = normalizeNetworkPolicy(p.networkPolicy);
   validateNetworkPolicyCombination(networkPolicy, p);
+  validateHostConfigParams(p.hostConfig);
 
   log.info(`Creating container ${p.name} from ${p.image}`);
 
@@ -108,9 +142,28 @@ export async function handleCreateContainer(
   }
 
   const gpuDeviceRequests = await buildGpuDeviceRequests(p.gpus);
-  const workspace = buildWorkspaceCreateInfo(p, networkPolicy !== "host");
+  const appWorkspace = buildWorkspaceCreateInfo(p, networkPolicy !== "host");
+  const lvmWorkspaceRequest = normalizeLvmWorkspaceRequest(p.workspace);
   const modelMounts = await buildModelMounts(config.modelCacheRoot, p.modelMounts);
+  const sharedMounts = buildSharedMounts(p.sharedMounts);
   const network = await buildNetworkCreateExtras(docker, networkPolicy);
+  let workspaceManager: LvmWorkspaceManager | null = null;
+  let preparedWorkspace: PreparedLvmWorkspace | null = null;
+
+  if (lvmWorkspaceRequest) {
+    workspaceManager = deps.workspaceManager ?? new LvmWorkspaceManager(config.lvmWorkspace);
+    emitProgress({
+      step: "creating",
+      phase: "workspace_lvm",
+      percent: null,
+      message: `Provisioning ${lvmWorkspaceRequest.sizeGb}G workspace for ${p.name}`,
+      context: { containerName: p.name, sizeGb: lvmWorkspaceRequest.sizeGb },
+    });
+    preparedWorkspace = await workspaceManager.prepare(
+      lvmWorkspaceRequest,
+      deps.workspaceId?.(),
+    );
+  }
 
   // 3. create
   emitProgress({
@@ -122,15 +175,32 @@ export async function handleCreateContainer(
 
   const createOpts = buildCreateOptions(p, {
     deviceRequests: gpuDeviceRequests,
-    env: workspace?.env,
-    ports: workspace?.ports,
-    volumes: modelMounts,
+    env: appWorkspace?.env,
+    ports: appWorkspace?.ports,
+    volumes: [
+      ...modelMounts,
+      ...sharedMounts,
+      ...(preparedWorkspace
+        ? [
+            {
+              host: preparedWorkspace.mountPoint,
+              container: preparedWorkspace.mountTarget,
+              mode: "rw" as const,
+            },
+          ]
+        : []),
+    ],
+    labels: preparedWorkspace ? labelsForPreparedWorkspace(preparedWorkspace) : undefined,
+    hostConfig: p.hostConfig,
     network,
   });
   let container;
   try {
     container = await docker.createContainer(createOpts);
   } catch (err) {
+    if (preparedWorkspace && workspaceManager) {
+      await cleanupPreparedWorkspace(workspaceManager, preparedWorkspace, "docker create failed");
+    }
     throw new Error(`create failed: ${(err as Error).message}`);
   }
 
@@ -145,6 +215,12 @@ export async function handleCreateContainer(
   try {
     await container.start();
   } catch (err) {
+    await container.remove({ force: true }).catch((removeErr) => {
+      log.warn(`failed to remove ${p.name} after start failed: ${(removeErr as Error).message}`);
+    });
+    if (preparedWorkspace && workspaceManager) {
+      await cleanupPreparedWorkspace(workspaceManager, preparedWorkspace, "docker start failed");
+    }
     throw new Error(`start failed: ${(err as Error).message}`);
   }
 
@@ -157,15 +233,23 @@ export async function handleCreateContainer(
         `failed to remove ${p.name} after network policy assertion failed: ${(removeErr as Error).message}`,
       );
     });
+    if (preparedWorkspace && workspaceManager) {
+      await cleanupPreparedWorkspace(
+        workspaceManager,
+        preparedWorkspace,
+        "network policy assertion failed",
+      );
+    }
     throw err;
   }
 
+  const workspaceResponse = buildWorkspaceResponse(appWorkspace?.response, preparedWorkspace);
   return {
     containerId: info.Id,
     name: info.Name.replace(/^\//, ""),
     image: p.image,
     state: info.State.Status,
-    ...(workspace ? { workspace: workspace.response } : {}),
+    ...(workspaceResponse ? { workspace: workspaceResponse } : {}),
   };
 }
 
@@ -195,6 +279,27 @@ function validateNetworkPolicyCombination(policy: NetworkPolicy, p: CreateParams
     throw new Error(
       `networkPolicy host cannot be combined with port bindings. ${supportedNetworkPolicyMessage()}`,
     );
+  }
+}
+
+function validateHostConfigParams(hostConfig: HostConfigParams | undefined): void {
+  if (!hostConfig) return;
+  validateOptionalInteger(hostConfig.memory, "hostConfig.memory", 1);
+  validateOptionalInteger(hostConfig.memorySwap, "hostConfig.memorySwap", -1);
+  validateOptionalInteger(hostConfig.cpuQuota, "hostConfig.cpuQuota", -1);
+  validateOptionalInteger(hostConfig.cpuPeriod, "hostConfig.cpuPeriod", 1);
+  if (
+    hostConfig.oomKillDisable !== undefined &&
+    typeof hostConfig.oomKillDisable !== "boolean"
+  ) {
+    throw new Error("hostConfig.oomKillDisable must be a boolean");
+  }
+}
+
+function validateOptionalInteger(value: unknown, field: string, min: number): void {
+  if (value === undefined || value === null) return;
+  if (!Number.isInteger(value) || (value as number) < min) {
+    throw new Error(`${field} must be an integer >= ${min}`);
   }
 }
 
@@ -328,6 +433,7 @@ function buildWorkspaceCreateInfo(
 ): { env: Record<string, string>; ports: PortBinding[]; response: WorkspaceCreateInfo } | null {
   if (!p.workspace) return null;
   const rawPort = p.workspace.port;
+  if (rawPort === undefined || rawPort === null) return null;
   if (typeof rawPort !== "number" || !Number.isInteger(rawPort) || rawPort < 1 || rawPort > 65535) {
     throw new Error("workspace.port is required and must be a TCP port number");
   }
@@ -391,6 +497,35 @@ async function buildModelMounts(
     });
   }
   return out;
+}
+
+function buildSharedMounts(sharedMounts: SharedMountRequest[] | undefined): VolumeBinding[] {
+  if (!sharedMounts || sharedMounts.length === 0) return [];
+
+  return sharedMounts.map((mount, index) => {
+    if (!mount || typeof mount.source !== "string" || mount.source.trim().length === 0) {
+      throw new Error(`sharedMounts[${index}].source is required`);
+    }
+    if (!mount.target || typeof mount.target !== "string") {
+      throw new Error(`sharedMounts[${index}].target is required`);
+    }
+
+    const source = mount.source.trim();
+    const target = mount.target.trim();
+    validateBindPath(source, `sharedMounts[${index}].source`);
+    validateBindPath(target, `sharedMounts[${index}].target`);
+    return {
+      host: source,
+      container: target,
+      mode: mount.readOnly === true ? "ro" : "rw",
+    };
+  });
+}
+
+function validateBindPath(value: string, field: string): void {
+  if (!value.startsWith("/") || value.includes(":") || value.includes("\n") || value.includes("\0")) {
+    throw new Error(`${field} must be an absolute path without colon or control characters`);
+  }
 }
 
 async function findContainerByName(
@@ -520,6 +655,7 @@ function buildCreateOptions(
   const hostConfig: Dockerode.HostConfig = {
     Binds: binds,
     RestartPolicy: { Name: p.restart_policy ?? "unless-stopped" },
+    ...buildHostConfigOverrides(extras.hostConfig),
     ...(Object.keys(portBindings).length > 0 ? { PortBindings: portBindings } : {}),
     ...(extras.deviceRequests ? { DeviceRequests: extras.deviceRequests } : {}),
     ...(extras.network ? { NetworkMode: extras.network.networkMode } : {}),
@@ -531,6 +667,10 @@ function buildCreateOptions(
     Env: envArr,
     ExposedPorts: exposedPorts,
     HostConfig: hostConfig,
+    Labels: {
+      ...(p.labels ?? {}),
+      ...(extras.labels ?? {}),
+    },
   };
 
   if (extras.network?.endpointsConfig) {
@@ -542,8 +682,64 @@ function buildCreateOptions(
   return createOptions;
 }
 
+function buildHostConfigOverrides(
+  hostConfig: HostConfigParams | undefined,
+): Partial<Dockerode.HostConfig> {
+  if (!hostConfig) return {};
+  return {
+    ...(hostConfig.memory !== undefined ? { Memory: hostConfig.memory } : {}),
+    ...(hostConfig.memorySwap !== undefined ? { MemorySwap: hostConfig.memorySwap } : {}),
+    ...(hostConfig.cpuQuota !== undefined ? { CpuQuota: hostConfig.cpuQuota } : {}),
+    ...(hostConfig.cpuPeriod !== undefined ? { CpuPeriod: hostConfig.cpuPeriod } : {}),
+    ...(hostConfig.oomKillDisable !== undefined
+      ? { OomKillDisable: hostConfig.oomKillDisable }
+      : {}),
+  };
+}
+
+function buildWorkspaceResponse(
+  appWorkspace: WorkspaceCreateInfo | undefined,
+  preparedWorkspace: PreparedLvmWorkspace | null,
+): Record<string, unknown> | null {
+  if (!appWorkspace && !preparedWorkspace) return null;
+  return {
+    ...(appWorkspace ?? {}),
+    ...(preparedWorkspace
+      ? {
+          id: preparedWorkspace.id,
+          device: preparedWorkspace.device,
+          mountPoint: preparedWorkspace.mountPoint,
+          mountTarget: preparedWorkspace.mountTarget,
+          sizeGb: preparedWorkspace.sizeGb,
+        }
+      : {}),
+  };
+}
+
+async function cleanupPreparedWorkspace(
+  workspaceManager: LvmWorkspaceManager,
+  workspace: PreparedLvmWorkspace,
+  reason: string,
+): Promise<void> {
+  try {
+    await workspaceManager.cleanup(workspace);
+  } catch (err) {
+    log.warn(
+      `workspace cleanup failed after ${reason} for ${workspace.mountPoint}: ${(err as Error).message}`,
+    );
+  }
+}
+
 export const __test = {
   normalizeNetworkPolicy,
+  buildCreateOptions: (
+    p: Record<string, unknown>,
+    extras: Record<string, unknown> = {},
+  ) => buildCreateOptions(p as unknown as CreateParams, extras as unknown as BuildCreateExtras),
+  buildSharedMounts: (sharedMounts: Array<Record<string, unknown>> | undefined) =>
+    buildSharedMounts(sharedMounts as unknown as SharedMountRequest[] | undefined),
+  validateHostConfigParams: (hostConfig: Record<string, unknown> | undefined) =>
+    validateHostConfigParams(hostConfig as unknown as HostConfigParams | undefined),
   hasMlWorkspaceOptions: (
     p: { gpus?: unknown[]; modelMounts?: unknown[]; workspace?: unknown },
     networkPolicy: NetworkPolicy,
