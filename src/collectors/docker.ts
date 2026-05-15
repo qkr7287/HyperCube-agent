@@ -2,6 +2,7 @@ import Dockerode from "dockerode";
 import os from "node:os";
 import { createLogger } from "../logger.js";
 import { resolveContainerCoresQuota } from "../utils/container-cpu-quota.js";
+import { collectWorkspaceUsageFromLabels } from "../workspace-lvm.js";
 import type {
   ContainerInfo,
   ContainerMetrics,
@@ -198,6 +199,7 @@ export class DockerCollector {
       sampleTimestamp,
       sampleTimeMs,
     );
+    const workspace = await collectWorkspaceUsageFromLabels(containerInfo.labels);
 
     const blkio = s.blkio_stats?.io_service_bytes_recursive ?? [];
     let diskRead = 0;
@@ -232,6 +234,7 @@ export class DockerCollector {
       },
       network: { rx: rxTotal, tx: txTotal },
       disk: { read: diskRead, write: diskWrite },
+      ...(workspace ? { workspace } : {}),
       network_stats: networkStats,
     };
   }
