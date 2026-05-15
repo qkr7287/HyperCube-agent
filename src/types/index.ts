@@ -11,6 +11,16 @@ export interface AppConfig {
   dcgmExporterUrl: string | null;
   gpuPerContainerEnabled: boolean;
   modelCacheRoot: string;
+  lvmWorkspace: LvmWorkspaceConfig;
+}
+
+export interface LvmWorkspaceConfig {
+  enabled: boolean;
+  volumeGroup: string;
+  thinPool: string;
+  mountRoot: string;
+  uid: number;
+  gid: number;
 }
 
 // --- System Metrics ---
@@ -25,22 +35,15 @@ export interface CpuInfo {
   efficiencyCores: number;
   usage: number;
   perCore: number[];
-  // 1-minute load average. Linux only — POSIX semantics on macOS too but the
-  // contract scopes this to Linux to avoid platform-specific interpretation.
+  // 1-minute load average. Linux only.
   loadAvg1m?: number;
 }
 
 export interface MemoryInfo {
   total: number;
-  // Bytes that programs can claim without swapping. On Linux this maps to
-  // /proc/meminfo MemAvailable (excludes reclaimable buffer/cache from
-  // "used"). Required by the payload contract — `total - free` overcounts
-  // used memory by 30-50% on a healthy server.
   available: number;
-  // total - available. NOT total - free.
   used: number;
   free: number;
-  // (total - available) / total * 100.
   usage: number;
 }
 
@@ -49,6 +52,16 @@ export interface DiskInfo {
   used: number;
   free: number;
   usage: number;
+}
+
+export interface LvmThinPoolInfo {
+  available: boolean;
+  vg: string;
+  thinPool: string;
+  thinPoolSizeGb: number | null;
+  thinPoolUsedGb: number | null;
+  usedPct: number | null;
+  alert: "ok" | "warn" | "critical" | null;
 }
 
 export interface NetworkInfo {
@@ -80,8 +93,6 @@ export interface GpuMetric {
   model: string;
   memoryTotal: number;
   memoryUsed: number;
-  // (memoryUsed / memoryTotal) * 100. Optional — omitted when memoryTotal=0
-  // (fallback path on hosts where vram is unknown).
   memoryPercent?: number;
   usage: number;
   temperature?: number;
@@ -94,6 +105,9 @@ export interface SystemMetrics {
   cpu: CpuInfo;
   memory: MemoryInfo;
   disk: DiskInfo;
+  lvm?: {
+    thinPool: LvmThinPoolInfo;
+  };
   network: NetworkInfo;
   docker: DockerSummary;
   processes: ProcessesSummary;
@@ -130,58 +144,34 @@ export interface ContainerInfo {
 
 export interface ContainerMetrics {
   containerId: string;
-  // Container identity duplicated from the latest containers snapshot so the
-  // backend can correlate metrics → container without joining against a
-  // separate message stream. Trades a few bytes per cycle for not requiring
-  // the consumer to maintain a containerId → metadata index.
   name: string;
   image: string;
   state: string;
   cpu: {
     usage: number;
     cores: number;
-    // Normalized CPU% in [0, 100], computed as usage / cores_quota. null when
-    // cores_quota cannot be determined (e.g. inspect failed). Frontends should
-    // render null as "—" rather than 0 to avoid silently dropping the row.
     usage_pct: number | null;
-    // Logical cores Docker allows the container to consume. Sourced from
-    // HostConfig in priority order: NanoCpus (--cpus), CpuQuota/CpuPeriod,
-    // CpusetCpus count, then host total. null when inspect failed.
     cores_quota: number | null;
   };
   memory: { usage: number; limit: number; percent: number };
   network: { rx: number; tx: number };
   disk: { read: number; write: number };
+  workspace?: WorkspaceUsage;
   network_stats: ContainerNetworkStat[];
   gpu?: GpuPerContainer;
 }
 
-// Per-container GPU usage. memory_* in MiB (intentionally different unit than
-// host-level GpuMetric which uses bytes — payload size and dashboard
-// readability win out over consistency here).
-//
-// `usage` is nullable because NVIDIA blocks per-process SM% on GeForce/RTX
-// consumer cards at the driver level — no agent (us, nvtop, dcgm-exporter)
-// can recover it. null = "measurement unavailable". Frontends should render
-// it as "—" rather than 0, otherwise sort-by-usage silently drops these
-// containers to the bottom.
-//
-// `source` records which path produced the numbers so backend/UI can flag
-// low-confidence rows:
-//   "pmon"           — nvidia-smi pmon sm% per PID, summed by container.
-//                      ±10-20%p sampling error. Works on data-center GPUs.
-//   "dcgm-mig"       — DCGM exporter SM_ACTIVE for a MIG instance bound
-//                      1:1 to the container. Hardware counter, most accurate.
-//   "host-util-solo" — RTX consumer fallback: only one compute container
-//                      occupies the GPU, so the host-level utilization IS
-//                      that container's utilization. Exact, not an estimate.
-//   "vram-only"      — RTX with multiple compute containers sharing one
-//                      GPU. usage = null because the driver won't let us
-//                      split the host utilization across PIDs.
+export interface WorkspaceUsage {
+  device: string;
+  mountPoint: string;
+  sizeGb: number;
+  usedGb: number;
+  availableGb: number;
+  usedPct: number;
+}
+
 export interface GpuPerContainer {
   usage: number | null;
-  // Bytes (per agent-payload-contract.md). Renamed from memory_used (MiB) in
-  // the contract bump — backend / frontend update concurrently.
   memoryUsed: number;
   memoryTotal: number;
   indices: string[];
@@ -243,6 +233,7 @@ export interface ContainerEvent {
 
 export type WsMessageType =
   | "system_metrics"
+  | "capacity_report"
   | "containers"
   | "container_metrics"
   | "container_events"
@@ -252,7 +243,6 @@ export type WsMessageType =
   | "exec_chunk"
   | "exec_end";
 
-// Canonical streaming envelope used by metric/snapshot pushes.
 export interface WsEnvelopedMessage {
   type:
     | "system_metrics"
@@ -261,6 +251,52 @@ export interface WsEnvelopedMessage {
     | "container_events";
   data: Record<string, unknown>;
   timestamp: string;
+}
+
+export interface CapacityReportMessage {
+  type: "capacity_report";
+  agentId: string;
+  timestamp: string;
+  data: CapacityReportData;
+}
+
+export interface CapacityReportData {
+  cpu: {
+    cores: number;
+    model: string | null;
+    architecture: string;
+  };
+  memory: {
+    totalMb: number;
+  };
+  disk: {
+    rootTotalGb: number | null;
+    rootUsedGb: number | null;
+    filesystem: string | null;
+    lvm: LvmThinPoolInfo;
+  };
+  network: {
+    primaryInterface: string | null;
+    speedMbps: number | null;
+  };
+  gpu: {
+    count: number;
+    devices: Array<{
+      index: number;
+      model: string;
+      memoryMb: number;
+      migEnabled: boolean;
+    }>;
+  };
+  os: {
+    distro: string | null;
+    kernel: string;
+    cgroupVersion: "v1" | "v2" | "unknown";
+  };
+  agent: {
+    version: string;
+    nodeVersion: string;
+  };
 }
 
 export type LogStreamSource = "stdout" | "stderr" | "mixed";
@@ -291,7 +327,6 @@ export interface ExecChunkMessage {
   type: "exec_chunk";
   execId: string;
   stream: ExecChunkSource;
-  // base64-encoded raw bytes (binary safe; UTF-8, ANSI escape, Ctrl keys).
   data: string;
 }
 
@@ -305,7 +340,6 @@ export type ExecEndReason =
 export interface ExecEndMessage {
   type: "exec_end";
   execId: string;
-  // null for detach / TTY exits without a recoverable exit code.
   exitCode: number | null;
   reason: ExecEndReason;
   error?: string;
@@ -313,12 +347,13 @@ export interface ExecEndMessage {
 
 export type WsMessage =
   | WsEnvelopedMessage
+  | CapacityReportMessage
   | LogChunkMessage
   | LogStreamEndMessage
   | ExecChunkMessage
   | ExecEndMessage;
 
-// --- Commands (Backend → Agent) ---
+// --- Commands (Backend -> Agent) ---
 
 export type CommandName =
   | "get_logs"
@@ -326,6 +361,7 @@ export type CommandName =
   | "image_inspect"
   | "control"
   | "system_info"
+  | "request_capacity"
   | "create_container"
   | "prepare_model_assets"
   | "delete_container"
