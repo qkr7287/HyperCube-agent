@@ -23,6 +23,14 @@ const config: AppConfig = {
   dcgmExporterUrl: null,
   gpuPerContainerEnabled: true,
   modelCacheRoot: "/tmp/hypercube-model-cache",
+  lvmWorkspace: {
+    enabled: true,
+    volumeGroup: "vg0",
+    thinPool: "thin_pool",
+    mountRoot: "/var/lib/hypercube/workspaces",
+    uid: 1000,
+    gid: 100,
+  },
 };
 
 const emitProgress: ProgressEmitter = () => undefined;
