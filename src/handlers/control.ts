@@ -1,6 +1,7 @@
 import type Dockerode from "dockerode";
 import { createLogger } from "../logger.js";
-import type { ContainerAction } from "../types/index.js";
+import { LvmWorkspaceManager, workspaceFromLabels } from "../workspace-lvm.js";
+import type { AppConfig, ContainerAction } from "../types/index.js";
 
 const log = createLogger("handler:control");
 
@@ -11,6 +12,7 @@ const VALID_ACTIONS = new Set<ContainerAction>([
 export async function handleControl(
   docker: Dockerode,
   params: Record<string, unknown>,
+  config?: AppConfig,
 ): Promise<Record<string, unknown>> {
   const containerId = params.containerId as string | undefined;
   const action = params.action as ContainerAction | undefined;
@@ -47,7 +49,14 @@ export async function handleControl(
       await container.kill();
       break;
     case "remove":
-      await container.remove({ force });
+      {
+        const info = await container.inspect();
+        const workspace = workspaceFromLabels(info.Config?.Labels ?? {});
+        await container.remove({ force });
+        if (workspace && config) {
+          await new LvmWorkspaceManager(config.lvmWorkspace).cleanup(workspace);
+        }
+      }
       break;
   }
 
