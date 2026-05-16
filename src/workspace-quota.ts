@@ -120,8 +120,8 @@ export class WorkspaceQuotaManager {
 
     if (this.config.enabled) {
       await this.runCleanup(
-        "setquota",
-        ["-P", String(projectId), "0", "0", "0", "0", this.config.mountRoot],
+        "xfs_quota",
+        ["-x", "-c", `limit -p bsoft=0 bhard=0 ${projectId}`, this.config.mountRoot],
         errors,
       );
       await this.runCleanup(
@@ -147,10 +147,19 @@ export class WorkspaceQuotaManager {
   }
 
   private async runQuota(projectId: number, hardGb: number): Promise<void> {
-    const hardBytes = String(BigInt(hardGb) * BigInt(1024) * BigInt(1024) * BigInt(1024));
+    // `setquota -P <id> <bsoft> <bhard> ...` interprets the numeric block
+    // arguments as 1 KiB blocks, not bytes — feeding bytes there enforces a
+    // limit 1024× too large (10 GiB request → 10 TiB enforced). xfs_quota's
+    // `limit` subcommand accepts size suffixes (g = GiB) so we sidestep the
+    // unit confusion entirely and only one tool drives the cap.
     await this.runner.run(
-      "setquota",
-      ["-P", String(projectId), hardBytes, hardBytes, "0", "0", this.config.mountRoot],
+      "xfs_quota",
+      [
+        "-x",
+        "-c",
+        `limit -p bsoft=${hardGb}g bhard=${hardGb}g ${projectId}`,
+        this.config.mountRoot,
+      ],
       { timeoutMs: 10_000, maxBuffer: 1024 * 1024 },
     );
   }
@@ -189,8 +198,8 @@ export class WorkspaceQuotaManager {
     const errors: string[] = [];
     if (state.quotaSet) {
       await this.runCleanup(
-        "setquota",
-        ["-P", String(state.projectId), "0", "0", "0", "0", this.config.mountRoot],
+        "xfs_quota",
+        ["-x", "-c", `limit -p bsoft=0 bhard=0 ${state.projectId}`, this.config.mountRoot],
         errors,
       );
     }

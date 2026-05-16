@@ -62,7 +62,7 @@ async function main(): Promise<void> {
   assertProjectIdDeterminismAndRange();
   await assertPrepareCommandOrder();
   await assertTeardownCommandOrder();
-  await assertPrepareRollbackOnSetquotaFailure();
+  await assertPrepareRollbackOnLimitFailure();
   await assertDockerCreateFailureRollback();
   await assertDockerStartFailureRollback();
   await assertWorkspaceUsageParsing();
@@ -222,11 +222,14 @@ async function assertPrepareCommandOrder(): Promise<void> {
     assert.equal(ws.mountTarget, "/workspace");
     assert.ok(ws.projectId >= 100_000 && ws.projectId <= 16_777_215);
 
-    const hardBytes = (BigInt(10) * BigInt(1024) * BigInt(1024) * BigInt(1024)).toString();
     const calls = runner.calls.map((call) => call.join(" "));
     assert.deepEqual(calls, [
       `xfs_quota -x -c project -s -p ${tmpRoot}/05eddec05865 ${ws.projectId} ${tmpRoot}`,
-      `setquota -P ${ws.projectId} ${hardBytes} ${hardBytes} 0 0 ${tmpRoot}`,
+      // xfs_quota's `limit` subcommand takes block sizes with explicit
+      // suffixes (g = GiB) and writes the cap into XFS in bytes. setquota's
+      // -P bsoft/bhard arguments are 1 KiB blocks, which silently inflates
+      // the limit by 1024×; see issue #16 unit-bug post-mortem.
+      `xfs_quota -x -c limit -p bsoft=10g bhard=10g ${ws.projectId} ${tmpRoot}`,
     ]);
     const mapping = await fs.readFile(`${tmpRoot}/.projects`, "utf-8");
     assert.equal(mapping, `${ws.projectId}:hc-05eddec05865\n`);
@@ -250,7 +253,7 @@ async function assertTeardownCommandOrder(): Promise<void> {
     assert.deepEqual(
       runner.calls.map((call) => call.join(" ")),
       [
-        `setquota -P ${expectedId} 0 0 0 0 ${tmpRoot}`,
+        `xfs_quota -x -c limit -p bsoft=0 bhard=0 ${expectedId} ${tmpRoot}`,
         `xfs_quota -x -c project -C -p ${workspacePath} ${expectedId} ${tmpRoot}`,
       ],
     );
@@ -260,8 +263,14 @@ async function assertTeardownCommandOrder(): Promise<void> {
   }
 }
 
-async function assertPrepareRollbackOnSetquotaFailure(): Promise<void> {
-  const runner = new FakeRunner("setquota");
+async function assertPrepareRollbackOnLimitFailure(): Promise<void> {
+  // Fail specifically on the `xfs_quota limit` call so the rollback path
+  // exercises project detach + workspace directory cleanup. Project attach
+  // and limit set both run through `xfs_quota`, so we match on the inner
+  // -c argument rather than the command name.
+  const failOnLimit = (command: string, args: readonly string[]): boolean =>
+    command === "xfs_quota" && args.some((arg) => arg.startsWith("limit "));
+  const runner = new FakeRunner(failOnLimit);
   const tmpRoot = posixTmpDir(await fs.mkdtemp(path.join(os.tmpdir(), "hc-quota-rollback-")));
   try {
     const manager = new WorkspaceQuotaManager({ enabled: true, mountRoot: tmpRoot }, runner);
@@ -271,7 +280,7 @@ async function assertPrepareRollbackOnSetquotaFailure(): Promise<void> {
     );
     const calls = runner.calls.map((call) => call.join(" "));
     assert.ok(calls.some((line) => line.startsWith("xfs_quota -x -c project -s -p ")));
-    assert.ok(calls.some((line) => line.startsWith("setquota -P")));
+    assert.ok(calls.some((line) => line.includes("limit -p bsoft=10g bhard=10g")));
     assert.ok(calls.some((line) => line.startsWith("xfs_quota -x -c project -C -p ")));
     await assert.rejects(fs.stat(`${tmpRoot}/05eddec05865`), { code: "ENOENT" });
   } finally {
@@ -381,17 +390,23 @@ async function maybeRunLiveContainerProof(): Promise<void> {
   );
 }
 
+type FakeRunnerFailMatcher = string | ((command: string, args: readonly string[]) => boolean);
+
 class FakeRunner implements CommandRunner {
   readonly calls: string[][] = [];
 
   constructor(
-    private readonly failCommand: string | null = null,
+    private readonly failCommand: FakeRunnerFailMatcher | null = null,
     private readonly outputs: Record<string, string> = {},
   ) {}
 
   async run(command: string, args: readonly string[] = []) {
     this.calls.push([command, ...args]);
-    if (command === this.failCommand) {
+    const shouldFail =
+      typeof this.failCommand === "function"
+        ? this.failCommand(command, args)
+        : command === this.failCommand;
+    if (shouldFail) {
       const err = new Error(`${command} boom`) as NodeJS.ErrnoException & { stderr?: string };
       err.stderr = `${command} boom`;
       throw err;
