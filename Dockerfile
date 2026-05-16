@@ -9,9 +9,13 @@ RUN npm run build
 FROM node:20-alpine
 # procps provides `ps`, which systeminformation's si.processes() shells out to.
 # Without it the call fails silently and processes.{total,running} are stuck at 0.
+#
+# xfsprogs + quota are the runtime requirements for the option-4b workspace
+# slice: xfs_quota drives per-container project ids and setquota writes the
+# hard cap. findmnt (util-linux) detects the prjquota mount option.
 RUN apk add --no-cache \
       docker-cli docker-cli-compose procps \
-      lvm2 e2fsprogs util-linux nfs-utils ethtool coreutils
+      xfsprogs quota util-linux ethtool coreutils
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev

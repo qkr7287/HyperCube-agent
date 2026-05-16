@@ -9,7 +9,7 @@
     "start": "node --env-file=.env dist/index.js",
     "typecheck": "tsc --noEmit",
     "self-test:network-policy": "npm run build && node dist/self-tests/create-container-network-policy.js",
-    "self-test:lvm-workspace": "npm run build && node dist/self-tests/resource-limits-lvm.js"
+    "self-test:workspace-quota": "npm run build && node dist/self-tests/resource-limits-quota.js"
   },
   "dependencies": {
     "dockerode": "^4.0.4",

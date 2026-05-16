@@ -1,6 +1,6 @@
 import os from "node:os";
 import { readFileSync } from "node:fs";
-import type { AppConfig, LvmWorkspaceConfig } from "./types/index.js";
+import type { AppConfig, WorkspaceQuotaConfig } from "./types/index.js";
 
 export function loadConfig(): AppConfig {
   const backendUrl = requireEnv("BACKEND_URL");
@@ -41,30 +41,19 @@ export function loadConfig(): AppConfig {
       (process.env.GPU_PER_CONTAINER_ENABLED ?? "true").toLowerCase() !== "false",
     modelCacheRoot:
       process.env.MODEL_CACHE_ROOT?.trim() || "/var/lib/hypercube-agent/model-cache",
-    lvmWorkspace: loadLvmWorkspaceConfig(),
+    workspaceQuota: loadWorkspaceQuotaConfig(),
   };
 }
 
-function loadLvmWorkspaceConfig(): LvmWorkspaceConfig {
+function loadWorkspaceQuotaConfig(): WorkspaceQuotaConfig {
   return {
-    enabled: (process.env.LVM_WORKSPACE_ENABLED ?? "true").toLowerCase() !== "false",
-    volumeGroup: process.env.LVM_WORKSPACE_VG?.trim() || "vg0",
-    thinPool: process.env.LVM_WORKSPACE_THIN_POOL?.trim() || "thin_pool",
+    // Default off: operators flip on after the loop+prjquota host setup
+    // (see docs/runbooks/workspace-quota-full-validation.md §1) is complete.
+    enabled: (process.env.WORKSPACE_QUOTA_ENABLED ?? "false").toLowerCase() === "true",
     mountRoot:
-      process.env.LVM_WORKSPACE_MOUNT_ROOT?.trim() ||
+      process.env.WORKSPACE_QUOTA_MOUNT?.trim() ||
       "/var/lib/hypercube/workspaces",
-    uid: parseNonNegativeInt(process.env.LVM_WORKSPACE_UID, 1000, "LVM_WORKSPACE_UID"),
-    gid: parseNonNegativeInt(process.env.LVM_WORKSPACE_GID, 100, "LVM_WORKSPACE_GID"),
   };
-}
-
-function parseNonNegativeInt(value: string | undefined, fallback: number, name: string): number {
-  if (value === undefined || value.trim() === "") return fallback;
-  const n = Number(value);
-  if (!Number.isInteger(n) || n < 0) {
-    throw new Error(`${name} must be a non-negative integer`);
-  }
-  return n;
 }
 
 function readHostHostname(): string | null {

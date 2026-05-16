@@ -1,11 +1,12 @@
 import type Dockerode from "dockerode";
+import { randomBytes } from "node:crypto";
 import { createLogger } from "../logger.js";
 import {
-  LvmWorkspaceManager,
+  WorkspaceQuotaManager,
   labelsForPreparedWorkspace,
-  normalizeLvmWorkspaceRequest,
-  type PreparedLvmWorkspace,
-} from "../workspace-lvm.js";
+  normalizeWorkspaceQuotaRequest,
+  type PreparedWorkspace,
+} from "../workspace-quota.js";
 import {
   INTERNAL_NETWORK_NAME,
   type NetworkPolicy,
@@ -57,7 +58,7 @@ interface WorkspaceParams {
   token?: string;
   port?: number;
   baseUrl?: string;
-  sizeGb?: number;
+  hardGb?: number;
   mountTarget?: string;
 }
 
@@ -104,8 +105,11 @@ interface WorkspaceCreateInfo {
 }
 
 interface CreateContainerDeps {
-  workspaceManager?: LvmWorkspaceManager;
-  workspaceId?: () => string;
+  workspaceManager?: WorkspaceQuotaManager;
+  // Override for self-tests so the generated workspace shortId is
+  // deterministic. Production callers omit this and get a fresh
+  // random 12 hex per workspace.
+  workspaceShortId?: () => string;
 }
 
 export async function handleCreateContainer(
@@ -143,26 +147,29 @@ export async function handleCreateContainer(
 
   const gpuDeviceRequests = await buildGpuDeviceRequests(p.gpus);
   const appWorkspace = buildWorkspaceCreateInfo(p, networkPolicy !== "host");
-  const lvmWorkspaceRequest = normalizeLvmWorkspaceRequest(p.workspace);
+  const quotaWorkspaceRequest = normalizeWorkspaceQuotaRequest(p.workspace);
   const modelMounts = await buildModelMounts(config.modelCacheRoot, p.modelMounts);
   const sharedMounts = buildSharedMounts(p.sharedMounts);
   const network = await buildNetworkCreateExtras(docker, networkPolicy);
-  let workspaceManager: LvmWorkspaceManager | null = null;
-  let preparedWorkspace: PreparedLvmWorkspace | null = null;
 
-  if (lvmWorkspaceRequest) {
-    workspaceManager = deps.workspaceManager ?? new LvmWorkspaceManager(config.lvmWorkspace);
+  let workspaceManager: WorkspaceQuotaManager | null = null;
+  let preparedWorkspace: PreparedWorkspace | null = null;
+
+  if (quotaWorkspaceRequest) {
+    workspaceManager = deps.workspaceManager ?? new WorkspaceQuotaManager(config.workspaceQuota);
+    const shortId = (deps.workspaceShortId ?? newWorkspaceShortId)();
     emitProgress({
       step: "creating",
-      phase: "workspace_lvm",
+      phase: "workspace_quota",
       percent: null,
-      message: `Provisioning ${lvmWorkspaceRequest.sizeGb}G workspace for ${p.name}`,
-      context: { containerName: p.name, sizeGb: lvmWorkspaceRequest.sizeGb },
+      message: `Provisioning ${quotaWorkspaceRequest.hardGb}G workspace for ${p.name}`,
+      context: { containerName: p.name, hardGb: quotaWorkspaceRequest.hardGb },
     });
-    preparedWorkspace = await workspaceManager.prepare(
-      lvmWorkspaceRequest,
-      deps.workspaceId?.(),
-    );
+    preparedWorkspace = await workspaceManager.prepare({
+      shortId,
+      hardGb: quotaWorkspaceRequest.hardGb,
+      mountTarget: quotaWorkspaceRequest.mountTarget,
+    });
   }
 
   // 3. create
@@ -183,7 +190,7 @@ export async function handleCreateContainer(
       ...(preparedWorkspace
         ? [
             {
-              host: preparedWorkspace.mountPoint,
+              host: preparedWorkspace.path,
               container: preparedWorkspace.mountTarget,
               mode: "rw" as const,
             },
@@ -251,6 +258,10 @@ export async function handleCreateContainer(
     state: info.State.Status,
     ...(workspaceResponse ? { workspace: workspaceResponse } : {}),
   };
+}
+
+function newWorkspaceShortId(): string {
+  return randomBytes(6).toString("hex");
 }
 
 function hasMlWorkspaceOptions(p: CreateParams, networkPolicy: NetworkPolicy): boolean {
@@ -699,33 +710,32 @@ function buildHostConfigOverrides(
 
 function buildWorkspaceResponse(
   appWorkspace: WorkspaceCreateInfo | undefined,
-  preparedWorkspace: PreparedLvmWorkspace | null,
+  preparedWorkspace: PreparedWorkspace | null,
 ): Record<string, unknown> | null {
   if (!appWorkspace && !preparedWorkspace) return null;
   return {
     ...(appWorkspace ?? {}),
     ...(preparedWorkspace
       ? {
-          id: preparedWorkspace.id,
-          device: preparedWorkspace.device,
-          mountPoint: preparedWorkspace.mountPoint,
+          path: preparedWorkspace.path,
+          projectId: preparedWorkspace.projectId,
+          hardGb: preparedWorkspace.hardGb,
           mountTarget: preparedWorkspace.mountTarget,
-          sizeGb: preparedWorkspace.sizeGb,
         }
       : {}),
   };
 }
 
 async function cleanupPreparedWorkspace(
-  workspaceManager: LvmWorkspaceManager,
-  workspace: PreparedLvmWorkspace,
+  workspaceManager: WorkspaceQuotaManager,
+  workspace: PreparedWorkspace,
   reason: string,
 ): Promise<void> {
   try {
-    await workspaceManager.cleanup(workspace);
+    await workspaceManager.teardown({ shortId: workspace.shortId });
   } catch (err) {
     log.warn(
-      `workspace cleanup failed after ${reason} for ${workspace.mountPoint}: ${(err as Error).message}`,
+      `workspace cleanup failed after ${reason} for ${workspace.path}: ${(err as Error).message}`,
     );
   }
 }

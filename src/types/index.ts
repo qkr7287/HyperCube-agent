@@ -11,16 +11,12 @@ export interface AppConfig {
   dcgmExporterUrl: string | null;
   gpuPerContainerEnabled: boolean;
   modelCacheRoot: string;
-  lvmWorkspace: LvmWorkspaceConfig;
+  workspaceQuota: WorkspaceQuotaConfig;
 }
 
-export interface LvmWorkspaceConfig {
+export interface WorkspaceQuotaConfig {
   enabled: boolean;
-  volumeGroup: string;
-  thinPool: string;
   mountRoot: string;
-  uid: number;
-  gid: number;
 }
 
 // --- System Metrics ---
@@ -54,14 +50,12 @@ export interface DiskInfo {
   usage: number;
 }
 
-export interface LvmThinPoolInfo {
+export interface WorkspaceQuotaInfo {
   available: boolean;
-  vg: string;
-  thinPool: string;
-  thinPoolSizeGb: number | null;
-  thinPoolUsedGb: number | null;
-  usedPct: number | null;
-  alert: "ok" | "warn" | "critical" | null;
+  mountPath: string | null;
+  totalGb: number | null;
+  freeGb: number | null;
+  hardEnforced: boolean;
 }
 
 export interface NetworkInfo {
@@ -105,9 +99,7 @@ export interface SystemMetrics {
   cpu: CpuInfo;
   memory: MemoryInfo;
   disk: DiskInfo;
-  lvm?: {
-    thinPool: LvmThinPoolInfo;
-  };
+  workspaceQuota?: WorkspaceQuotaInfo;
   network: NetworkInfo;
   docker: DockerSummary;
   processes: ProcessesSummary;
@@ -162,9 +154,9 @@ export interface ContainerMetrics {
 }
 
 export interface WorkspaceUsage {
-  device: string;
-  mountPoint: string;
-  sizeGb: number;
+  path: string;
+  projectId: number;
+  hardGb: number;
   usedGb: number;
   availableGb: number;
   usedPct: number;
@@ -273,7 +265,7 @@ export interface CapacityReportData {
     rootTotalGb: number | null;
     rootUsedGb: number | null;
     filesystem: string | null;
-    lvm: LvmThinPoolInfo;
+    workspaceQuota: WorkspaceQuotaInfo;
   };
   network: {
     primaryInterface: string | null;

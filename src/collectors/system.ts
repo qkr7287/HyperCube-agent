@@ -3,15 +3,15 @@ import os from "node:os";
 import { readLoggedInUsers } from "../utils/utmp.js";
 import { getCpuTopology } from "../utils/cpu-topology.js";
 import { collectGpuMetrics } from "../utils/gpu-topology.js";
-import { collectLvmThinPoolInfo } from "../workspace-lvm.js";
-import type { LvmWorkspaceConfig, SystemMetrics } from "../types/index.js";
+import { collectWorkspaceQuotaInfo } from "../workspace-quota.js";
+import type { WorkspaceQuotaConfig, SystemMetrics } from "../types/index.js";
 
 export async function collectSystemMetrics(
   hostname: string,
   dcgmExporterUrl: string | null = null,
-  lvmWorkspace?: LvmWorkspaceConfig,
+  workspaceQuota?: WorkspaceQuotaConfig,
 ): Promise<SystemMetrics> {
-  const [load, cpu, mem, disk, netIfaces, netStats, netConns, dockerInfo, procs, logins, gpu, lvm] =
+  const [load, cpu, mem, disk, netIfaces, netStats, netConns, dockerInfo, procs, logins, gpu, quota] =
     await Promise.all([
       si.currentLoad(),
       si.cpu(),
@@ -28,7 +28,7 @@ export async function collectSystemMetrics(
       si.processes().catch(() => ({ all: 0, running: 0 })),
       readLoggedInUsers().catch(() => []),
       collectGpuMetrics(dcgmExporterUrl).catch(() => []),
-      lvmWorkspace ? collectLvmThinPoolInfo(lvmWorkspace).catch(() => null) : Promise.resolve(null),
+      workspaceQuota ? collectWorkspaceQuotaInfo(workspaceQuota).catch(() => null) : Promise.resolve(null),
     ]);
 
   const topology = await getCpuTopology(load.cpus.length);
@@ -69,7 +69,7 @@ export async function collectSystemMetrics(
           usage: round(rootDisk.use),
         }
       : { total: 0, used: 0, free: 0, usage: 0 },
-    ...(lvm ? { lvm: { thinPool: lvm } } : {}),
+    ...(quota ? { workspaceQuota: quota } : {}),
     network: {
       interfaces: ifaceNames,
       connections: netConns.length,

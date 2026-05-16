@@ -11,7 +11,6 @@ import { LogStreamRegistry } from "./streaming/log-stream-registry.js";
 import { ExecRegistry } from "./streaming/exec-registry.js";
 import { registerAgent } from "./transport/register.js";
 import { AgentWebSocket } from "./transport/websocket.js";
-import { recoverLvmWorkspaceMounts } from "./workspace-recovery.js";
 
 const log = createLogger("agent");
 const collectLog = createLogger("collector");
@@ -46,6 +45,7 @@ async function main(): Promise<void> {
   startHeapWatch();
 
   const dockerCollector = new DockerCollector(config.dockerSocket);
+  dockerCollector.setWorkspaceQuotaConfig(config.workspaceQuota);
   const dockerAvailable = await dockerCollector.probe();
   if (!dockerAvailable) {
     log.warn("Docker not available. System metrics only. Will retry Docker every 30s.");
@@ -137,9 +137,6 @@ async function main(): Promise<void> {
   await sendCapacityReport(config, registration.id, ws).catch((err) => {
     log.warn(`Initial capacity_report skipped: ${(err as Error).message}`);
   });
-  await recoverLvmWorkspaceMounts(dockerCollector.getDocker(), config).catch((err) => {
-    log.warn(`LVM workspace recovery skipped: ${(err as Error).message}`);
-  });
   capacityTimer = setInterval(() => {
     void sendCapacityReport(config, registration.id, ws).catch((err) => {
       log.warn(`capacity_report failed: ${(err as Error).message}`);
@@ -215,7 +212,7 @@ async function collectAndSend(
     const system = await collectSystemMetrics(
       config.agentHostname,
       config.dcgmExporterUrl,
-      config.lvmWorkspace,
+      config.workspaceQuota,
     );
     const systemDelta = deltaEngine.computeSystemDelta(system);
     if (systemDelta) {

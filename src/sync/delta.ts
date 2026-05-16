@@ -200,9 +200,9 @@ function hasContainerWorkspaceChanged(
   if (!prev.workspace || !current.workspace) return true;
 
   return (
-    prev.workspace.device !== current.workspace.device ||
-    prev.workspace.mountPoint !== current.workspace.mountPoint ||
-    prev.workspace.sizeGb !== current.workspace.sizeGb ||
+    prev.workspace.path !== current.workspace.path ||
+    prev.workspace.projectId !== current.workspace.projectId ||
+    prev.workspace.hardGb !== current.workspace.hardGb ||
     Math.abs(prev.workspace.usedGb - current.workspace.usedGb) >=
       CONTAINER_WORKSPACE_USAGE_GB_THRESHOLD ||
     Math.abs(prev.workspace.availableGb - current.workspace.availableGb) >=

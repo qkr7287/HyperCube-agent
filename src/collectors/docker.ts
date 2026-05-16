@@ -2,13 +2,14 @@ import Dockerode from "dockerode";
 import os from "node:os";
 import { createLogger } from "../logger.js";
 import { resolveContainerCoresQuota } from "../utils/container-cpu-quota.js";
-import { collectWorkspaceUsageFromLabels } from "../workspace-lvm.js";
+import { collectWorkspaceUsageFromLabels } from "../workspace-quota.js";
 import type {
   ContainerInfo,
   ContainerMetrics,
   ContainerNetworkStat,
   GpuPerContainer,
   NetworkMappingMode,
+  WorkspaceQuotaConfig,
 } from "../types/index.js";
 
 const RETRY_INTERVAL = 30_000;
@@ -28,9 +29,14 @@ export class DockerCollector {
   // stops appearing in the running set.
   private coresQuotaCache = new Map<string, number | null>();
   private hostLogicalCores = os.cpus().length;
+  private workspaceQuotaConfig: WorkspaceQuotaConfig | null = null;
 
   constructor(socketPath: string) {
     this.docker = new Dockerode({ socketPath });
+  }
+
+  setWorkspaceQuotaConfig(config: WorkspaceQuotaConfig): void {
+    this.workspaceQuotaConfig = config;
   }
 
   get isAvailable(): boolean {
@@ -199,7 +205,9 @@ export class DockerCollector {
       sampleTimestamp,
       sampleTimeMs,
     );
-    const workspace = await collectWorkspaceUsageFromLabels(containerInfo.labels);
+    const workspace = this.workspaceQuotaConfig
+      ? await collectWorkspaceUsageFromLabels(containerInfo.labels, this.workspaceQuotaConfig)
+      : undefined;
 
     const blkio = s.blkio_stats?.io_service_bytes_recursive ?? [];
     let diskRead = 0;

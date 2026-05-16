@@ -1,6 +1,6 @@
 import type Dockerode from "dockerode";
 import { createLogger } from "../logger.js";
-import { LvmWorkspaceManager, workspaceFromLabels } from "../workspace-lvm.js";
+import { WorkspaceQuotaManager, workspaceFromLabels } from "../workspace-quota.js";
 import type { AppConfig, ContainerAction } from "../types/index.js";
 
 const log = createLogger("handler:control");
@@ -54,7 +54,15 @@ export async function handleControl(
         const workspace = workspaceFromLabels(info.Config?.Labels ?? {});
         await container.remove({ force });
         if (workspace && config) {
-          await new LvmWorkspaceManager(config.lvmWorkspace).cleanup(workspace);
+          try {
+            await new WorkspaceQuotaManager(config.workspaceQuota).teardown({
+              shortId: workspace.shortId,
+            });
+          } catch (err) {
+            log.warn(
+              `workspace teardown failed for ${workspace.path}: ${(err as Error).message}`,
+            );
+          }
         }
       }
       break;

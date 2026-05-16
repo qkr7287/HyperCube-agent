@@ -1,6 +1,6 @@
 import type Dockerode from "dockerode";
 import { createLogger } from "../logger.js";
-import { LvmWorkspaceManager, workspaceFromLabels } from "../workspace-lvm.js";
+import { WorkspaceQuotaManager, workspaceFromLabels } from "../workspace-quota.js";
 import type { AppConfig } from "../types/index.js";
 
 const log = createLogger("handler:delete");
@@ -45,7 +45,15 @@ export async function handleDeleteContainer(
   await container.remove({ force, v: removeVolumes });
 
   if (workspace && config) {
-    await new LvmWorkspaceManager(config.lvmWorkspace).cleanup(workspace);
+    try {
+      await new WorkspaceQuotaManager(config.workspaceQuota).teardown({
+        shortId: workspace.shortId,
+      });
+    } catch (err) {
+      log.warn(
+        `workspace teardown failed for ${workspace.path}: ${(err as Error).message}`,
+      );
+    }
   }
 
   return {

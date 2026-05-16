@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import si from "systeminformation";
 import { collectGpuInventory } from "../utils/gpu-inventory.js";
 import { defaultCommandRunner, type CommandRunner } from "../utils/command-runner.js";
-import { collectLvmThinPoolInfo } from "../workspace-lvm.js";
+import { collectWorkspaceQuotaInfo } from "../workspace-quota.js";
 import type { AppConfig, CapacityReportData, CapacityReportMessage } from "../types/index.js";
 
 export async function buildCapacityReport(
@@ -24,13 +24,13 @@ export async function collectHostCapacity(
   runner: CommandRunner = defaultCommandRunner,
 ): Promise<CapacityReportData> {
   const cpus = os.cpus();
-  const [disk, network, gpu, distro, cgroupVersion, lvm, agentVersion] = await Promise.all([
+  const [disk, network, gpu, distro, cgroupVersion, workspaceQuota, agentVersion] = await Promise.all([
     collectRootDisk(runner),
     collectPrimaryNetwork(runner),
     collectGpuCapacity(),
     readDistro(),
     collectCgroupVersion(runner),
-    collectLvmThinPoolInfo(config.lvmWorkspace, runner),
+    collectWorkspaceQuotaInfo(config.workspaceQuota, runner),
     readAgentVersion(),
   ]);
 
@@ -47,7 +47,7 @@ export async function collectHostCapacity(
       rootTotalGb: disk.rootTotalGb,
       rootUsedGb: disk.rootUsedGb,
       filesystem: disk.filesystem,
-      lvm,
+      workspaceQuota,
     },
     network,
     gpu,
