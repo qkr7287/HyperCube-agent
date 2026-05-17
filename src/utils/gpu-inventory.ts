@@ -158,7 +158,14 @@ async function runNvidiaSmi(args: string[]): Promise<string> {
     }
   }
 
-  if (sawEnoent) throw new Error("nvidia-smi not available");
+  // nvidia-smi binary not installed → treat the host as "no GPUs" rather
+  // than an error. Mirrors how "no devices were found" / driver-unreachable
+  // are handled above, and stops backend gpu_inventory polls from logging
+  // an ERROR every cycle on CPU-only hosts.
+  if (sawEnoent) {
+    log.debug("nvidia-smi not installed; reporting empty GPU inventory");
+    return "";
+  }
   throw new Error(lastMessage || "nvidia-smi not available");
 }
 
