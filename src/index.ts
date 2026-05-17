@@ -206,7 +206,11 @@ async function collectAndSend(
 
   // collect system metrics
   try {
-    const system = await collectSystemMetrics(config.agentHostname, config.dcgmExporterUrl);
+    const system = await collectSystemMetrics(
+      config.agentHostname,
+      config.dcgmExporterUrl,
+      config.hostSysPath,
+    );
     const systemDelta = deltaEngine.computeSystemDelta(system);
     if (systemDelta) {
       ws.send({

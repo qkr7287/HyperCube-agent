@@ -8,10 +8,15 @@ const execFileAsync = promisify(execFile);
 const log = createLogger("gpu");
 
 const NVIDIA_SMI_ARGS = [
-  "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu",
+  "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu,power.draw",
   "--format=csv,noheader,nounits",
 ];
-const NVIDIA_SMI_TIMEOUT_MS = 500;
+// 500ms is too tight: under startup load (many concurrent si.* calls,
+// driver cold-start) nvidia-smi can take ~1s and time out, which makes
+// the agent commit probeState to "fallback" for the rest of the process
+// lifetime — so backend never sees real nvidia-smi values (incl. the new
+// powerDrawW/temperatureC fields). 1500ms matches gpu-inventory util.
+const NVIDIA_SMI_TIMEOUT_MS = 1500;
 // systeminformation.graphics() shells out to lspci/lshw which may hang
 // indefinitely (or take seconds) when those binaries are missing or slow.
 // Race the entire fallback against the same 500ms ceiling as nvidia-smi.
@@ -158,6 +163,9 @@ function parseNvidiaSmiCsv(stdout: string): GpuMetric[] {
     const memoryUsedMib = Number(fields[3]);
     const usage = Number(fields[4]);
     const temperature = Number(fields[5]);
+    // power.draw is only present when nvidia-smi was queried with the new
+    // arg set. Treat missing or "[N/A]" (NaN after Number()) as null.
+    const powerDraw = fields.length >= 7 ? Number(fields[6]) : NaN;
 
     if (
       !Number.isFinite(index) ||
@@ -169,6 +177,7 @@ function parseNvidiaSmiCsv(stdout: string): GpuMetric[] {
       continue;
     }
 
+    const tempC = Number.isFinite(temperature) ? temperature : null;
     const metric: GpuMetric = {
       index,
       vendor: "NVIDIA",
@@ -176,9 +185,14 @@ function parseNvidiaSmiCsv(stdout: string): GpuMetric[] {
       memoryTotal: mibToBytes(memoryTotalMib),
       memoryUsed: mibToBytes(memoryUsedMib),
       usage,
+      // Explicit null (not omitted) so backend can distinguish
+      // "unsupported" from "actually 0".
+      temperatureC: tempC,
+      powerDrawW: Number.isFinite(powerDraw) ? Math.round(powerDraw * 10) / 10 : null,
     };
-    if (Number.isFinite(temperature)) {
-      metric.temperature = temperature;
+    if (tempC !== null) {
+      // Legacy field kept for any consumer still reading `temperature`.
+      metric.temperature = tempC;
     }
     parsed.push(metric);
   }
@@ -248,6 +262,10 @@ async function runGraphicsFallback(): Promise<GpuMetric[]> {
         memoryTotal: vram > 0 ? mibToBytes(vram) : 0,
         memoryUsed: 0,
         usage: 0,
+        // Fallback path has no live sensor access — explicit null so
+        // backend distinguishes "unsupported" from "actually 0".
+        temperatureC: null,
+        powerDrawW: null,
       });
     });
     return mapped;

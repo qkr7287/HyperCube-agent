@@ -33,10 +33,13 @@ export class DeltaEngine {
     const delta: Partial<SystemMetrics> = {};
     let hasChange = false;
 
-    if (Math.abs(prev.cpu.usage - current.cpu.usage) >= CPU_THRESHOLD) {
-      delta.cpu = current.cpu;
-      hasChange = true;
-    }
+    // cpu always included. The usage-threshold optimization that lived here
+    // would have starved backend's Level-2 burden estimator of fresh
+    // packagePowerW/tempC readings on idle hosts (where usage rarely
+    // crosses CPU_THRESHOLD). The cpu object is small enough that
+    // per-tick sends are negligible.
+    delta.cpu = current.cpu;
+    hasChange = true;
 
     if (Math.abs(prev.memory.usage - current.memory.usage) >= MEMORY_THRESHOLD) {
       delta.memory = current.memory;
@@ -53,6 +56,11 @@ export class DeltaEngine {
     // processes/logins always included (small payload, dashboard depends on them)
     delta.processes = current.processes;
     delta.logins = current.logins;
+    // gpu always included so per-tick power/temp readings (powerDrawW,
+    // temperatureC) reach the backend's Level-2 burden estimator. Without
+    // this the first snapshot's GPU values would persist forever in
+    // SystemMetricsHistory and the chart would flatline.
+    delta.gpu = current.gpu;
     hasChange = true;
 
     this.prevSystem = current;

@@ -20,6 +20,7 @@ const config: AppConfig = {
   dockerSocket: "/var/run/docker.sock",
   advertiseIp: null,
   hostProcPath: "/proc",
+  hostSysPath: "/sys",
   dcgmExporterUrl: null,
   gpuPerContainerEnabled: true,
   modelCacheRoot: "/tmp/hypercube-model-cache",

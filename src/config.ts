@@ -32,6 +32,11 @@ export function loadConfig(): AppConfig {
     // (e.g. /proc:/host/proc:ro) so cgroup files can map PIDs back to
     // containers. Native installs leave this at /proc.
     hostProcPath: process.env.HOST_PROC_PATH?.trim() || "/proc",
+    // RAPL + thermal_zone path. Default "/sys" works because dev/prod
+    // compose runs the agent privileged — the container's own /sys
+    // already reflects host hardware. Set HOST_SYS_PATH=/host/sys when
+    // running unprivileged with /sys bind-mounted.
+    hostSysPath: process.env.HOST_SYS_PATH?.trim() || "/sys",
     // Optional dcgm-exporter scrape URL (Prometheus text format). When set
     // and reachable, the agent prefers DCGM SM_ACTIVE for host GPU and uses
     // MIG-instance metrics for containers attached 1:1 to a MIG slice.

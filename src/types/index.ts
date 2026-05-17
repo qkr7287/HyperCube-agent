@@ -8,6 +8,11 @@ export interface AppConfig {
   dockerSocket: string;
   advertiseIp: string | null;
   hostProcPath: string;
+  // Path to host /sys (or container view of it). RAPL (powercap) and
+  // thermal_zone* live here. With privileged: true the container's own
+  // /sys already exposes host hardware files; override with HOST_SYS_PATH
+  // when running unprivileged with /sys bind-mounted elsewhere.
+  hostSysPath: string;
   dcgmExporterUrl: string | null;
   gpuPerContainerEnabled: boolean;
   modelCacheRoot: string;
@@ -28,6 +33,15 @@ export interface CpuInfo {
   // 1-minute load average. Linux only — POSIX semantics on macOS too but the
   // contract scopes this to Linux to avoid platform-specific interpretation.
   loadAvg1m?: number;
+  // RAPL package-domain average watts since the previous collection cycle.
+  // Sum across all intel-rapl:N package domains. null when RAPL is missing
+  // (non-Intel/AMD, virtualized, EPERM) or on the very first sample.
+  // NEVER 0 for "unsupported" — 0 means a real 0W reading.
+  packagePowerW?: number | null;
+  // CPU package temperature in °C from /sys/class/thermal/. Prefers
+  // x86_pkg_temp / coretemp / k10temp zones; falls back to the hottest
+  // available zone. null when no thermal zone is exposed.
+  tempC?: number | null;
 }
 
 export interface MemoryInfo {
@@ -84,7 +98,13 @@ export interface GpuMetric {
   // (fallback path on hosts where vram is unknown).
   memoryPercent?: number;
   usage: number;
+  // Existing temperature field, °C — kept for backward compatibility.
   temperature?: number;
+  // Level-2 burden-estimate fields. Always present with explicit null when
+  // nvidia-smi returned [N/A] for this GPU, so backend can distinguish
+  // "unsupported" from "actually 0".
+  temperatureC?: number | null;
+  powerDrawW?: number | null;
 }
 
 export interface SystemMetrics {
