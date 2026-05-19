@@ -24,6 +24,12 @@ services:
       - /proc:/host/proc:ro
       - /var/run/utmp:/var/run/utmp:ro
       - /etc/hostname:/host/etc/hostname:ro
+      # Model cache must persist to the host so downstream containers (created
+      # by backend with bind mount to the same host path) can read the asset.
+      # Without this, prepare_model_assets writes to the agent's writable
+      # layer only — files vanish on agent restart AND any container bind-
+      # mounting the host path sees an empty directory.
+      - /var/lib/hypercube-agent/model-cache:/var/lib/hypercube-agent/model-cache
     group_add:
       - "${DOCKER_GID:-999}"
     # Cap json-file growth at 20MB x 10 = 200MB per container. Without this
