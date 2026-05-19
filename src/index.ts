@@ -3,8 +3,11 @@ import { createLogger } from "./logger.js";
 import { collectSystemMetrics } from "./collectors/system.js";
 import { DockerCollector } from "./collectors/docker.js";
 import { collectGpuPerContainer } from "./collectors/gpu-per-container.js";
+import { DockerEventSubscriber } from "./collectors/docker-events.js";
 import { DeltaEngine } from "./sync/delta.js";
 import { dispatchCommand } from "./handlers/index.js";
+import { LogStreamRegistry } from "./streaming/log-stream-registry.js";
+import { ExecRegistry } from "./streaming/exec-registry.js";
 import { registerAgent } from "./transport/register.js";
 import { AgentWebSocket } from "./transport/websocket.js";
 
@@ -12,6 +15,9 @@ const log = createLogger("agent");
 const collectLog = createLogger("collector");
 const abortController = new AbortController();
 let collectTimer: ReturnType<typeof setInterval> | null = null;
+let logRegistryRef: LogStreamRegistry | null = null;
+let execRegistryRef: ExecRegistry | null = null;
+let wsRef: AgentWebSocket | null = null;
 let collecting = false;
 let lastContainersFullSnapshotAt = 0;
 let lastContainerMetricsFullSnapshotAt = 0;
@@ -59,27 +65,73 @@ async function main(): Promise<void> {
 
   // connect websocket
   const ws = new AgentWebSocket(config, registration.id, token);
+  wsRef = ws;
   const deltaEngine = new DeltaEngine();
+  const logRegistry = new LogStreamRegistry((msg) => ws.send(msg));
+  logRegistryRef = logRegistry;
+  const execRegistry = new ExecRegistry((msg) => ws.send(msg));
+  execRegistryRef = execRegistry;
+
+  let eventSubscriber: DockerEventSubscriber | null = null;
+  const startEventSubscriber = (): void => {
+    const dockerClient = dockerCollector.getDocker();
+    if (!dockerClient) return;
+    if (eventSubscriber) {
+      eventSubscriber.stop();
+      eventSubscriber = null;
+    }
+    eventSubscriber = new DockerEventSubscriber(dockerClient, (events) => {
+      if (!ws.isConnected || events.length === 0) return;
+      ws.send({
+        type: "container_events",
+        data: { events } as unknown as Record<string, unknown>,
+        timestamp: new Date().toISOString(),
+      });
+    });
+    eventSubscriber.start();
+  };
 
   ws.onReconnect = () => {
     log.info("Reconnected. Sending full snapshot on next cycle.");
     deltaEngine.reset();
     lastContainersFullSnapshotAt = 0;
     lastContainerMetricsFullSnapshotAt = 0;
+    startEventSubscriber();
   };
 
   ws.onCommand = (request) => {
-    return dispatchCommand(dockerCollector.getDocker(), request, (progress) => {
-      ws.sendProgress({
-        type: "command_progress",
-        requestId: request.requestId,
-        ...progress,
-      });
-    });
+    return dispatchCommand(
+      dockerCollector.getDocker(),
+      request,
+      (progress) => {
+        ws.sendProgress({
+          type: "command_progress",
+          requestId: request.requestId,
+          ...progress,
+        });
+      },
+      logRegistry,
+      execRegistry,
+      config,
+      token,
+    );
+  };
+
+  // WS disconnect → clean up all active streams. Browser owns re-subscribe
+  // responsibility per spec; chunks emitted while disconnected would be
+  // dropped by ws.send anyway.
+  ws.onClose = () => {
+    logRegistry.closeAll(null);
+    void execRegistry.closeAll(null);
   };
 
   // initial connection with retry
   await connectWithRetry(ws);
+
+  // begin streaming Docker container lifecycle events (no-op when Docker
+  // unavailable; collectContainers loop will retry the daemon, after which
+  // a future reconnect or manual restart will pick up the stream).
+  startEventSubscriber();
 
   // send first snapshot with timeout — if si.* hangs, still start collect loop
   log.info("Sending initial snapshot...");
@@ -154,7 +206,11 @@ async function collectAndSend(
 
   // collect system metrics
   try {
-    const system = await collectSystemMetrics(config.agentHostname, config.dcgmExporterUrl);
+    const system = await collectSystemMetrics(
+      config.agentHostname,
+      config.dcgmExporterUrl,
+      config.hostSysPath,
+    );
     const systemDelta = deltaEngine.computeSystemDelta(system);
     if (systemDelta) {
       ws.send({
@@ -245,7 +301,25 @@ function shutdown(signal: string): void {
   log.info(`Received ${signal}. Shutting down...`);
   abortController.abort();
   if (collectTimer) clearInterval(collectTimer);
-  process.exit(0);
+  if (logRegistryRef) {
+    logRegistryRef.closeAll("agent_shutdown");
+  }
+  if (execRegistryRef) {
+    // exec_end reason enum has no agent_shutdown; "kill" is the closest
+    // forced-termination signal the browser knows about.
+    void execRegistryRef.closeAll("kill");
+  }
+  // Give the socket ~150ms to flush log_stream_end / exec_end frames before
+  // tearing down. Without this the SIGTERM → process.exit race drops the
+  // final batch on the floor.
+  setTimeout(() => {
+    try {
+      wsRef?.close();
+    } catch {
+      // ignore
+    }
+    process.exit(0);
+  }, 150);
 }
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));

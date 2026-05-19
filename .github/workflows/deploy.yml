@@ -32,11 +32,10 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - name: server-16
-            host: 192.168.0.16
-            user: root
-            port: 2022
-            path: /home/agics-ai/docker/hypercube-agent
+          # server-16 (192.168.0.16) was decommissioned 2026-05. Old prod
+          # backend on :3334 is gone and the host is unreachable. Re-add when
+          # the host comes back or stays out — see project_workspace_quota_slice
+          # memory for legacy state.
           - name: server-41
             host: 192.168.0.41
             user: root

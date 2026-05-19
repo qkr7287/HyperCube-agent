@@ -14,6 +14,9 @@ const CONTAINER_GPU_USAGE_THRESHOLD = 2;
 // 1 MiB — small enough to catch real allocation moves, large enough to ignore
 // per-cycle jitter in the driver's reported counts.
 const CONTAINER_GPU_MEM_THRESHOLD = 1024 * 1024;
+// GB. 0.05 GB = 50 MB — du output rounds to 2 decimals so anything smaller is
+// noise, but a real model checkpoint write blows past this immediately.
+const CONTAINER_WORKSPACE_USED_THRESHOLD = 0.05;
 
 export class DeltaEngine {
   private prevSystem: SystemMetrics | null = null;
@@ -33,10 +36,13 @@ export class DeltaEngine {
     const delta: Partial<SystemMetrics> = {};
     let hasChange = false;
 
-    if (Math.abs(prev.cpu.usage - current.cpu.usage) >= CPU_THRESHOLD) {
-      delta.cpu = current.cpu;
-      hasChange = true;
-    }
+    // cpu always included. The usage-threshold optimization that lived here
+    // would have starved backend's Level-2 burden estimator of fresh
+    // packagePowerW/tempC readings on idle hosts (where usage rarely
+    // crosses CPU_THRESHOLD). The cpu object is small enough that
+    // per-tick sends are negligible.
+    delta.cpu = current.cpu;
+    hasChange = true;
 
     if (Math.abs(prev.memory.usage - current.memory.usage) >= MEMORY_THRESHOLD) {
       delta.memory = current.memory;
@@ -53,6 +59,11 @@ export class DeltaEngine {
     // processes/logins always included (small payload, dashboard depends on them)
     delta.processes = current.processes;
     delta.logins = current.logins;
+    // gpu always included so per-tick power/temp readings (powerDrawW,
+    // temperatureC) reach the backend's Level-2 burden estimator. Without
+    // this the first snapshot's GPU values would persist forever in
+    // SystemMetricsHistory and the chart would flatline.
+    delta.gpu = current.gpu;
     hasChange = true;
 
     this.prevSystem = current;
@@ -122,7 +133,8 @@ export class DeltaEngine {
       if (
         Math.abs(prev.cpu.usage - metrics.cpu.usage) >= CONTAINER_CPU_THRESHOLD ||
         hasContainerNetworkChanged(prev, metrics) ||
-        hasContainerGpuChanged(prev, metrics)
+        hasContainerGpuChanged(prev, metrics) ||
+        hasContainerWorkspaceChanged(prev, metrics)
       ) {
         changed[id] = metrics;
         hasChange = true;
@@ -187,6 +199,29 @@ function hasNullableRateChanged(prev: number | null, current: number | null): bo
   if (prev === current) return false;
   if (prev === null || current === null) return true;
   return Math.abs(prev - current) >= CONTAINER_NETWORK_RATE_THRESHOLD;
+}
+
+function hasContainerWorkspaceChanged(
+  prev: ContainerMetrics,
+  current: ContainerMetrics,
+): boolean {
+  const a = prev.workspace;
+  const b = current.workspace;
+  if (!a && !b) return false;
+  if (!a || !b) return true;
+  if (a.source !== b.source) return true;
+  if (a.path !== b.path) return true;
+  if (a.projectId !== b.projectId) return true;
+  if (hasNullableGbChanged(a.usedGb, b.usedGb)) return true;
+  if (hasNullableGbChanged(a.rwLayerGb, b.rwLayerGb)) return true;
+  if (hasNullableGbChanged(a.rootFsGb, b.rootFsGb)) return true;
+  return false;
+}
+
+function hasNullableGbChanged(prev: number | null, current: number | null): boolean {
+  if (prev === current) return false;
+  if (prev === null || current === null) return true;
+  return Math.abs(prev - current) >= CONTAINER_WORKSPACE_USED_THRESHOLD;
 }
 
 function hasContainerGpuChanged(

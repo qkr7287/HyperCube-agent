@@ -38,6 +38,7 @@ export class AgentWebSocket {
   private drainTimer: ReturnType<typeof setTimeout> | null = null;
 
   onReconnect: (() => void) | null = null;
+  onClose: (() => void) | null = null;
   onCommand: ((request: CommandRequest) => Promise<CommandResponse>) | null = null;
 
   constructor(
@@ -107,6 +108,11 @@ export class AgentWebSocket {
         this.stopSendStats();
         this.stopSilenceTimer();
         this.stopDrain();
+        try {
+          this.onClose?.();
+        } catch (err) {
+          log.warn(`onClose handler threw: ${(err as Error).message}`);
+        }
         if (!resolved) {
           resolved = true;
           reject(new Error(`WebSocket closed: ${code}`));

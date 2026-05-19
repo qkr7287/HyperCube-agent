@@ -26,9 +26,17 @@ DIST_DIR="${REPO_ROOT}/dist-installer"
 IMAGE_TAR="${DIST_DIR}/agent-image-${VERSION}.tar"
 DEBS_DIR="${DIST_DIR}/docker-debs"
 PAYLOAD_TAR="${DIST_DIR}/payload-${VERSION}.tar"
-INSTALLER="${DIST_DIR}/hypercube-agent-installer-${VERSION}.sh"
 TEMPLATE="${REPO_ROOT}/installer/install-template.sh"
 BUNDLE_DOCKER="${HC_BUNDLE_DOCKER:-1}"
+
+# Disambiguate filenames so full + slim installers can co-exist in
+# dist-installer/. Full ships Ubuntu 24.04 .deb bundle; slim is
+# distro-agnostic but requires Docker pre-installed on the target.
+if [[ "$BUNDLE_DOCKER" == "1" ]]; then
+  INSTALLER="${DIST_DIR}/hypercube-agent-installer-${VERSION}-ubuntu24.sh"
+else
+  INSTALLER="${DIST_DIR}/hypercube-agent-installer-${VERSION}-slim.sh"
+fi
 
 log()  { printf '\033[1;34m[*]\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m[OK]\033[0m %s\n' "$*"; }

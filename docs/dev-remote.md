@@ -73,6 +73,6 @@ mutagen sync flush agent-63
 
 ## 백엔드 확인
 
-각 dev agent는 `server_<suffix>_dev` hostname으로 `ws://192.168.0.16:3334`에 붙는다. HyperCube Admin UI의 agent 목록에서 `server_63_dev`, `server_16_dev` 표시를 확인한다.
+각 dev agent는 `server_<suffix>_dev` hostname으로 dev backend (`ws://192.168.0.63:38000`)에 붙는다. HyperCube Admin UI(`http://192.168.0.63:38000`)의 agent 목록에서 `server_63_dev` 등이 잡히는지 확인한다.
 
-Prod와 dev가 **동시에 같은 백엔드**로 붙되 hostname이 달라 별개 agent로 처리됨.
+Prod 와 dev 는 **별개의 백엔드**로 분리 (prod=`:37003`, dev=`:38000`, 같은 63번 호스트에 컨테이너 격리: `hcprod-*` vs `hc-*`). 한 agent 가 둘 다 reporting 하지 않도록 `.env` 의 `BACKEND_URL` 만 분리하면 됨.

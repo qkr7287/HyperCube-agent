@@ -8,8 +8,14 @@ export interface AppConfig {
   dockerSocket: string;
   advertiseIp: string | null;
   hostProcPath: string;
+  // Path to host /sys (or container view of it). RAPL (powercap) and
+  // thermal_zone* live here. With privileged: true the container's own
+  // /sys already exposes host hardware files; override with HOST_SYS_PATH
+  // when running unprivileged with /sys bind-mounted elsewhere.
+  hostSysPath: string;
   dcgmExporterUrl: string | null;
   gpuPerContainerEnabled: boolean;
+  modelCacheRoot: string;
 }
 
 // --- System Metrics ---
@@ -27,6 +33,15 @@ export interface CpuInfo {
   // 1-minute load average. Linux only — POSIX semantics on macOS too but the
   // contract scopes this to Linux to avoid platform-specific interpretation.
   loadAvg1m?: number;
+  // RAPL package-domain average watts since the previous collection cycle.
+  // Sum across all intel-rapl:N package domains. null when RAPL is missing
+  // (non-Intel/AMD, virtualized, EPERM) or on the very first sample.
+  // NEVER 0 for "unsupported" — 0 means a real 0W reading.
+  packagePowerW?: number | null;
+  // CPU package temperature in °C from /sys/class/thermal/. Prefers
+  // x86_pkg_temp / coretemp / k10temp zones; falls back to the hottest
+  // available zone. null when no thermal zone is exposed.
+  tempC?: number | null;
 }
 
 export interface MemoryInfo {
@@ -83,7 +98,13 @@ export interface GpuMetric {
   // (fallback path on hosts where vram is unknown).
   memoryPercent?: number;
   usage: number;
+  // Existing temperature field, °C — kept for backward compatibility.
   temperature?: number;
+  // Level-2 burden-estimate fields. Always present with explicit null when
+  // nvidia-smi returned [N/A] for this GPU, so backend can distinguish
+  // "unsupported" from "actually 0".
+  temperatureC?: number | null;
+  powerDrawW?: number | null;
 }
 
 export interface SystemMetrics {
@@ -125,6 +146,25 @@ export interface ContainerInfo {
   labels: Record<string, string>;
   networks?: string[];
   mounts?: ContainerMount[];
+  // Writable layer size (SizeRw from listContainers size:true). Populated only
+  // on size-capture cycles and held cached between; null when not yet measured.
+  sizeRw?: number | null;
+  sizeRootFs?: number | null;
+  // Bind-mount source path for /workspace if any container mount targets it as
+  // a host bind. null when /workspace lives in the overlay or a named volume.
+  workspaceBindSource?: string | null;
+}
+
+// Per-container workspace storage usage. Composed from multiple sources, with
+// `source` recording which one produced `usedGb`. Backend renders null fields
+// as "—" rather than 0.
+export interface ContainerWorkspaceUsage {
+  usedGb: number | null;
+  rwLayerGb: number | null;
+  rootFsGb: number | null;
+  path: string | null;
+  projectId: number | null;
+  source: "du" | "rw-layer" | "xfs-quota" | null;
 }
 
 export interface ContainerMetrics {
@@ -153,6 +193,7 @@ export interface ContainerMetrics {
   disk: { read: number; write: number };
   network_stats: ContainerNetworkStat[];
   gpu?: GpuPerContainer;
+  workspace?: ContainerWorkspaceUsage;
 }
 
 // Per-container GPU usage. memory_* in MiB (intentionally different unit than
@@ -213,42 +254,144 @@ export interface ContainerNetworkStat {
   timestamp: string | null;
 }
 
+// --- Container Lifecycle Events ---
+
+export type ContainerEventKind =
+  | "start"
+  | "stop"
+  | "die"
+  | "restart"
+  | "pause"
+  | "unpause"
+  | "kill"
+  | "oom"
+  | "health_status";
+
+export type ContainerHealthStatus = "healthy" | "unhealthy" | "starting";
+
+export interface ContainerEvent {
+  containerId: string;
+  name?: string;
+  ts: string;
+  kind: ContainerEventKind;
+  exitCode?: number;
+  signal?: string;
+  healthStatus?: ContainerHealthStatus;
+}
+
 // --- WebSocket Messages ---
 
 export type WsMessageType =
   | "system_metrics"
   | "containers"
   | "container_metrics"
-  | "command_response";
+  | "container_events"
+  | "command_response"
+  | "log_chunk"
+  | "log_stream_end"
+  | "exec_chunk"
+  | "exec_end";
 
-export interface WsMessage {
-  type: WsMessageType;
+// Canonical streaming envelope used by metric/snapshot pushes.
+export interface WsEnvelopedMessage {
+  type:
+    | "system_metrics"
+    | "containers"
+    | "container_metrics"
+    | "container_events";
   data: Record<string, unknown>;
   timestamp: string;
 }
+
+export type LogStreamSource = "stdout" | "stderr" | "mixed";
+
+export interface LogChunkMessage {
+  type: "log_chunk";
+  streamId: string;
+  stream: LogStreamSource;
+  lines: string[];
+}
+
+export type LogStreamEndReason =
+  | "container_stopped"
+  | "container_removed"
+  | "stream_error"
+  | "agent_shutdown";
+
+export interface LogStreamEndMessage {
+  type: "log_stream_end";
+  streamId: string;
+  reason: LogStreamEndReason;
+  error?: string;
+}
+
+export type ExecChunkSource = "stdout" | "stderr";
+
+export interface ExecChunkMessage {
+  type: "exec_chunk";
+  execId: string;
+  stream: ExecChunkSource;
+  // base64-encoded raw bytes (binary safe; UTF-8, ANSI escape, Ctrl keys).
+  data: string;
+}
+
+export type ExecEndReason =
+  | "natural"
+  | "kill"
+  | "container_stopped"
+  | "error"
+  | "browser_disconnect";
+
+export interface ExecEndMessage {
+  type: "exec_end";
+  execId: string;
+  // null for detach / TTY exits without a recoverable exit code.
+  exitCode: number | null;
+  reason: ExecEndReason;
+  error?: string;
+}
+
+export type WsMessage =
+  | WsEnvelopedMessage
+  | LogChunkMessage
+  | LogStreamEndMessage
+  | ExecChunkMessage
+  | ExecEndMessage;
 
 // --- Commands (Backend → Agent) ---
 
 export type CommandName =
   | "get_logs"
   | "inspect"
+  | "image_inspect"
   | "control"
   | "system_info"
   | "create_container"
+  | "prepare_model_assets"
   | "delete_container"
   | "compose_up"
-  | "compose_down";
+  | "compose_down"
+  | "logs_subscribe"
+  | "logs_unsubscribe"
+  | "container_processes"
+  | "exec_open"
+  | "exec_input"
+  | "exec_resize"
+  | "exec_close";
 
 export type ProgressStep =
   | "pulling_image"
   | "creating"
   | "starting"
-  | "running_check";
+  | "running_check"
+  | "preparing_model_assets"
+  | "verifying_model_assets";
 
 export interface CommandProgress {
   type: "command_progress";
   requestId: string;
   step: ProgressStep;
+  phase?: string;
   percent: number | null;
   message: string;
   context?: Record<string, unknown>;
@@ -285,7 +428,9 @@ export type SystemInfoSubCommand =
   | "processes"
   | "network_detail"
   | "users"
-  | "users_history";
+  | "users_history"
+  | "capabilities"
+  | "gpu_inventory";
 
 // --- Agent Registration ---
 

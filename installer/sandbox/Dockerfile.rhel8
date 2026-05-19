@@ -1,0 +1,53 @@
+# Rocky Linux 8.4 = bit-for-bit RHEL 8.4 clone. Used to verify the slim
+# installer (HC_BUNDLE_DOCKER=0) on a real RHEL-family host with Docker
+# pre-installed.
+FROM quay.io/rockylinux/rockylinux:8.4
+
+# Rocky 8.4 is past full support, so the live mirror paths return 404
+# for that specific tag. Point dnf at the vault layout (/vault/rocky/8.4/...)
+# instead of /$contentdir/$releasever/.
+RUN sed -i \
+      -e 's|^mirrorlist=|#mirrorlist=|g' \
+      -e 's|^#baseurl=http://dl.rockylinux.org/\$contentdir/\$releasever|baseurl=https://dl.rockylinux.org/vault/rocky/8.4|g' \
+      /etc/yum.repos.d/*.repo
+
+# Base utilities — sshd for the operator, iptables for the air-gap firewall,
+# dnf-plugins-core so we can register the Docker repo.
+RUN dnf install -y --setopt=install_weak_deps=False \
+      openssh-server sudo iptables \
+      iproute procps-ng \
+      curl wget which \
+      dnf-plugins-core && \
+    dnf clean all
+
+# Docker CE from the official CentOS repo (Rocky 8 == RHEL 8 ABI). This is
+# what an operator on a real RHEL 8 host would have done.
+RUN dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo && \
+    dnf install -y --setopt=install_weak_deps=False \
+      docker-ce docker-ce-cli containerd.io \
+      docker-compose-plugin docker-buildx-plugin && \
+    dnf clean all
+
+# Pre-seed daemon.json:
+#   storage-driver=vfs    -> dodge overlay-on-overlay incompat when this
+#                            sandbox itself runs nested under Docker
+#                            Desktop on Windows/WSL2.
+#   selinux-enabled=false -> matches the real RHEL 8 deploy guidance
+#                            (airgap-install.md § A-3, option 1).
+RUN mkdir -p /etc/docker && \
+    printf '{\n  "storage-driver": "vfs",\n  "selinux-enabled": false\n}\n' \
+      > /etc/docker/daemon.json
+
+# SSH config — root password login for the test box only.
+RUN ssh-keygen -A && \
+    mkdir -p /var/run/sshd && \
+    echo 'root:hypercube' | chpasswd && \
+    sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+EXPOSE 22
+
+COPY entrypoint-rhel8.sh /usr/local/bin/sandbox-entrypoint.sh
+RUN chmod +x /usr/local/bin/sandbox-entrypoint.sh
+
+CMD ["/usr/local/bin/sandbox-entrypoint.sh"]

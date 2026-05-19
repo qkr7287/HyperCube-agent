@@ -3,14 +3,30 @@ import os from "node:os";
 import { readLoggedInUsers } from "../utils/utmp.js";
 import { getCpuTopology } from "../utils/cpu-topology.js";
 import { collectGpuMetrics } from "../utils/gpu-topology.js";
+import { getPackagePowerW } from "../utils/cpu-power.js";
+import { getPackageTempC } from "../utils/cpu-temp.js";
 import type { SystemMetrics } from "../types/index.js";
 
 export async function collectSystemMetrics(
   hostname: string,
   dcgmExporterUrl: string | null = null,
+  hostSysPath = "/sys",
 ): Promise<SystemMetrics> {
-  const [load, cpu, mem, disk, netIfaces, netStats, netConns, dockerInfo, procs, logins, gpu] =
-    await Promise.all([
+  const [
+    load,
+    cpu,
+    mem,
+    disk,
+    netIfaces,
+    netStats,
+    netConns,
+    dockerInfo,
+    procs,
+    logins,
+    gpu,
+    packagePowerW,
+    cpuTempC,
+  ] = await Promise.all([
       si.currentLoad(),
       si.cpu(),
       si.mem(),
@@ -26,6 +42,8 @@ export async function collectSystemMetrics(
       si.processes().catch(() => ({ all: 0, running: 0 })),
       readLoggedInUsers().catch(() => []),
       collectGpuMetrics(dcgmExporterUrl).catch(() => []),
+      getPackagePowerW(hostSysPath).catch(() => null),
+      getPackageTempC(hostSysPath).catch(() => null),
     ]);
 
   const topology = await getCpuTopology(load.cpus.length);
@@ -56,6 +74,10 @@ export async function collectSystemMetrics(
       usage: round(load.currentLoad),
       perCore: load.cpus.map((c) => round(c.load)),
       ...(os.platform() === "linux" ? { loadAvg1m: round(os.loadavg()[0]) } : {}),
+      // Always emit explicit null (not omitted) so the backend's Level-2
+      // burden estimator can distinguish "unsupported host" from "0 W".
+      packagePowerW,
+      tempC: cpuTempC,
     },
     memory: buildMemoryInfo(mem),
     disk: rootDisk

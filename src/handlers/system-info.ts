@@ -3,12 +3,20 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import { createLogger } from "../logger.js";
 import { readLoggedInUsers, readWtmpSessions } from "../utils/utmp.js";
+import { getAgentCapabilities } from "../capabilities.js";
+import { collectGpuInventory } from "../utils/gpu-inventory.js";
 import type { SystemInfoSubCommand } from "../types/index.js";
 
 const log = createLogger("handler:system-info");
 
 const VALID_SUB_COMMANDS = new Set<SystemInfoSubCommand>([
-  "cpu_detail", "processes", "network_detail", "users", "users_history",
+  "cpu_detail",
+  "processes",
+  "network_detail",
+  "users",
+  "users_history",
+  "capabilities",
+  "gpu_inventory",
 ]);
 
 const MAX_PROCESSES = 50;
@@ -40,6 +48,10 @@ export async function handleSystemInfo(
       return await getUsers();
     case "users_history":
       return await getUsersHistory(params.limit);
+    case "capabilities":
+      return getAgentCapabilities();
+    case "gpu_inventory":
+      return await collectGpuInventory();
   }
 }
 
