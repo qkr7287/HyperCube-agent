@@ -146,6 +146,25 @@ export interface ContainerInfo {
   labels: Record<string, string>;
   networks?: string[];
   mounts?: ContainerMount[];
+  // Writable layer size (SizeRw from listContainers size:true). Populated only
+  // on size-capture cycles and held cached between; null when not yet measured.
+  sizeRw?: number | null;
+  sizeRootFs?: number | null;
+  // Bind-mount source path for /workspace if any container mount targets it as
+  // a host bind. null when /workspace lives in the overlay or a named volume.
+  workspaceBindSource?: string | null;
+}
+
+// Per-container workspace storage usage. Composed from multiple sources, with
+// `source` recording which one produced `usedGb`. Backend renders null fields
+// as "—" rather than 0.
+export interface ContainerWorkspaceUsage {
+  usedGb: number | null;
+  rwLayerGb: number | null;
+  rootFsGb: number | null;
+  path: string | null;
+  projectId: number | null;
+  source: "du" | "rw-layer" | "xfs-quota" | null;
 }
 
 export interface ContainerMetrics {
@@ -174,6 +193,7 @@ export interface ContainerMetrics {
   disk: { read: number; write: number };
   network_stats: ContainerNetworkStat[];
   gpu?: GpuPerContainer;
+  workspace?: ContainerWorkspaceUsage;
 }
 
 // Per-container GPU usage. memory_* in MiB (intentionally different unit than

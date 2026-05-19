@@ -2,10 +2,12 @@ import Dockerode from "dockerode";
 import os from "node:os";
 import { createLogger } from "../logger.js";
 import { resolveContainerCoresQuota } from "../utils/container-cpu-quota.js";
+import { WorkspaceUsageProbe } from "../utils/workspace-usage.js";
 import type {
   ContainerInfo,
   ContainerMetrics,
   ContainerNetworkStat,
+  ContainerWorkspaceUsage,
   GpuPerContainer,
   NetworkMappingMode,
 } from "../types/index.js";
@@ -13,6 +15,11 @@ import type {
 const RETRY_INTERVAL = 30_000;
 const CONCURRENCY_LIMIT = 10;
 const STATS_TIMEOUT = 3_000;
+// listContainers({size:true}) makes the daemon walk every container's overlay,
+// which on a host with 50+ containers can add 100-500ms. We only need fresh
+// rw-layer sizes every ~10s for the workspace usage KPI, so request size:true
+// every Nth cycle and cache results in between.
+const SIZE_CAPTURE_EVERY_N_CYCLES = 5;
 const log = createLogger("docker");
 
 export class DockerCollector {
@@ -27,9 +34,16 @@ export class DockerCollector {
   // stops appearing in the running set.
   private coresQuotaCache = new Map<string, number | null>();
   private hostLogicalCores = os.cpus().length;
+  // Cycle counter for deciding when to include size:true in listContainers.
+  private cycleCount = 0;
+  // Last captured SizeRw/SizeRootFs per container, refreshed every
+  // SIZE_CAPTURE_EVERY_N_CYCLES and reused on cycles in between.
+  private lastSizes = new Map<string, { sizeRw: number; sizeRootFs: number }>();
+  private workspaceProbe: WorkspaceUsageProbe;
 
   constructor(socketPath: string) {
     this.docker = new Dockerode({ socketPath });
+    this.workspaceProbe = new WorkspaceUsageProbe(this.docker);
   }
 
   get isAvailable(): boolean {
@@ -70,24 +84,53 @@ export class DockerCollector {
     }
 
     try {
-      const containers = await this.docker.listContainers({ all: true });
-      return containers.map((c) => ({
-        id: c.Id.slice(0, 12),
-        name: (c.Names[0] ?? "").replace(/^\//, ""),
-        image: c.Image,
-        state: c.State,
-        status: c.Status,
-        ports: c.Ports.map((p) => ({
-          IP: p.IP,
-          PrivatePort: p.PrivatePort,
-          PublicPort: p.PublicPort,
-          Type: p.Type,
-        })),
-        created: c.Created,
-        labels: c.Labels ?? {},
-        networks: extractUserNetworks(c),
-        mounts: extractVolumeMounts(c),
-      }));
+      this.cycleCount += 1;
+      const includeSize = this.cycleCount % SIZE_CAPTURE_EVERY_N_CYCLES === 1;
+      const containers = await this.docker.listContainers({ all: true, size: includeSize });
+      const liveIds = new Set<string>();
+
+      const mapped = containers.map((c) => {
+        const id = c.Id.slice(0, 12);
+        liveIds.add(id);
+        // Refresh size cache only on capture cycles. dockerode's types omit
+        // SizeRw/SizeRootFs even though the Docker API returns them, so we
+        // read through a narrowed any.
+        if (includeSize) {
+          const raw = c as unknown as { SizeRw?: number; SizeRootFs?: number };
+          if (typeof raw.SizeRw === "number" && typeof raw.SizeRootFs === "number") {
+            this.lastSizes.set(id, { sizeRw: raw.SizeRw, sizeRootFs: raw.SizeRootFs });
+          }
+        }
+        const sizes = this.lastSizes.get(id);
+        return {
+          id,
+          name: (c.Names[0] ?? "").replace(/^\//, ""),
+          image: c.Image,
+          state: c.State,
+          status: c.Status,
+          ports: c.Ports.map((p) => ({
+            IP: p.IP,
+            PrivatePort: p.PrivatePort,
+            PublicPort: p.PublicPort,
+            Type: p.Type,
+          })),
+          created: c.Created,
+          labels: c.Labels ?? {},
+          networks: extractUserNetworks(c),
+          mounts: extractVolumeMounts(c),
+          sizeRw: sizes?.sizeRw ?? null,
+          sizeRootFs: sizes?.sizeRootFs ?? null,
+          workspaceBindSource: extractWorkspaceBindSource(c),
+        };
+      });
+
+      // Prune caches for containers that no longer exist (stopped + removed).
+      for (const id of this.lastSizes.keys()) {
+        if (!liveIds.has(id)) this.lastSizes.delete(id);
+      }
+      this.workspaceProbe.prune(liveIds);
+
+      return mapped;
     } catch (err) {
       log.warn(`collectContainers failed: ${(err as Error).message}`);
       this.available = false;
@@ -214,6 +257,8 @@ export class DockerCollector {
         ? clampPercent(cpuUsage / coresQuota)
         : null;
 
+    const workspace = await this.buildWorkspaceUsage(containerInfo);
+
     return {
       containerId,
       name: containerInfo.name,
@@ -233,6 +278,46 @@ export class DockerCollector {
       network: { rx: rxTotal, tx: txTotal },
       disk: { read: diskRead, write: diskWrite },
       network_stats: networkStats,
+      ...(workspace ? { workspace } : {}),
+    };
+  }
+
+  // Compose ContainerWorkspaceUsage from two sources:
+  //   - du -sb /workspace via docker exec  (preferred, workspace-specific)
+  //   - SizeRw from listContainers          (fallback for distroless / when du fails)
+  // Returns null only when neither source produced anything (no size capture
+  // yet AND du failed) — caller leaves the workspace field absent in that case
+  // so the backend can distinguish "not measured" from "measured as zero".
+  private async buildWorkspaceUsage(
+    info: ContainerInfo,
+  ): Promise<ContainerWorkspaceUsage | null> {
+    const du = await this.workspaceProbe.measure(info.id);
+    const sizeRw = info.sizeRw ?? null;
+    const sizeRootFs = info.sizeRootFs ?? null;
+    const rwLayerGb = sizeRw !== null ? round2(sizeRw / 2 ** 30) : null;
+    const rootFsGb = sizeRootFs !== null ? round2(sizeRootFs / 2 ** 30) : null;
+
+    let usedGb: number | null = null;
+    let source: ContainerWorkspaceUsage["source"] = null;
+    if (du.source === "du" && du.usedGb !== null) {
+      usedGb = du.usedGb;
+      source = "du";
+    } else if (rwLayerGb !== null) {
+      usedGb = rwLayerGb;
+      source = "rw-layer";
+    }
+
+    // Skip emitting the field entirely if nothing meaningful — avoids creating
+    // a payload-bloat row of nulls every cycle before the first size capture.
+    if (usedGb === null && rwLayerGb === null && rootFsGb === null) return null;
+
+    return {
+      usedGb,
+      rwLayerGb,
+      rootFsGb,
+      path: info.workspaceBindSource ?? null,
+      projectId: null, // populated when XFS prjquota collector lands (Phase 3)
+      source,
     };
   }
 
@@ -344,6 +429,8 @@ function extractUserNetworks(c: Dockerode.ContainerInfo): string[] {
 interface DockerMount {
   Type?: string;
   Name?: string;
+  Source?: string;
+  Destination?: string;
 }
 
 function extractVolumeMounts(c: Dockerode.ContainerInfo): { name: string; type: "volume" }[] {
@@ -351,6 +438,19 @@ function extractVolumeMounts(c: Dockerode.ContainerInfo): { name: string; type: 
   return mounts
     .filter((m) => m.Type === "volume" && typeof m.Name === "string" && m.Name.length > 0)
     .map((m) => ({ name: m.Name as string, type: "volume" as const }));
+}
+
+// Returns the host-side source path of /workspace when the container has it as
+// a bind mount, else null. Named volumes (Type==="volume") and overlay-only
+// workspaces both return null — those are measured via SizeRw / du instead.
+function extractWorkspaceBindSource(c: Dockerode.ContainerInfo): string | null {
+  const mounts = (c.Mounts ?? []) as DockerMount[];
+  const ws = mounts.find((m) => m.Type === "bind" && m.Destination === "/workspace");
+  return typeof ws?.Source === "string" ? ws.Source : null;
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
 }
 
 interface RawDockerNetworkCounters {
