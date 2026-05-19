@@ -97,8 +97,16 @@ export class DockerCollector {
         // read through a narrowed any.
         if (includeSize) {
           const raw = c as unknown as { SizeRw?: number; SizeRootFs?: number };
-          if (typeof raw.SizeRw === "number" && typeof raw.SizeRootFs === "number") {
-            this.lastSizes.set(id, { sizeRw: raw.SizeRw, sizeRootFs: raw.SizeRootFs });
+          // Docker omits SizeRw entirely when the container has written nothing
+          // to its RW layer (SizeRw == 0). SizeRootFs is always present with
+          // size:true. So gate only on SizeRootFs and treat a missing SizeRw
+          // as 0 — otherwise idle containers (redis/postgres/nginx) never get
+          // cached and their workspace.rwLayerGb stays null forever.
+          if (typeof raw.SizeRootFs === "number") {
+            this.lastSizes.set(id, {
+              sizeRw: typeof raw.SizeRw === "number" ? raw.SizeRw : 0,
+              sizeRootFs: raw.SizeRootFs,
+            });
           }
         }
         const sizes = this.lastSizes.get(id);
