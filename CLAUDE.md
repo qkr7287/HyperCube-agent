@@ -18,6 +18,7 @@
 - **Windows autocrlf 함정**: `.sh` 파일이 CRLF면 Linux 컨테이너 무한 재시작. `.gitattributes`에 `*.sh text eol=lf` 보장. (`memory: debug_crlf_mutagen_trap`)
 - Docker json-file 로그는 compose에서 **20MB × 10**로 cap. 호스트 unbounded log 방지.
 - GPU per-container source 자동 전환: `DCGM-MIG → pmon → host-util-solo`. RTX는 idle에 pmon이 sm 차단 = 정상. (`memory: nvidia_rtx_pmon_behavior`)
+- **GPU prod 호스트는 `.env`에 `AGENT_RUNTIME=nvidia` 필수**. compose 가 `runtime: ${AGENT_RUNTIME:-runc}` 로 default runc 를 명시하므로, daemon 의 `default-runtime: nvidia` 가 있어도 compose 값에 override 됨 → nvidia-container-toolkit hook 미발동 → `nvidia-smi` 미주입 → agent 가 lspci/sysfs fallback 으로 `"GA104 [GeForce RTX 3060 Ti]"` 같은 PCI ID 송신 + memory/power/temp 누락. 증상이 보이면 첫 점검: `docker inspect <agent> --format '{{.HostConfig.Runtime}}'` 결과가 `nvidia` 인지 확인.
 - 첫 systeminformation 호출은 Windows에서 3~5초 → 첫 스냅샷 타임아웃 없이 대기.
 - serena LSP TypeScript 활성. 80줄+ 파일은 `get_symbols_overview` → `find_symbol` 우선.
 

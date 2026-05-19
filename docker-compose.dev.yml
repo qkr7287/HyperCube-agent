@@ -46,6 +46,10 @@ services:
       - /var/run/utmp:/var/run/utmp:ro
       - /var/log/wtmp:/host/var/log/wtmp:ro
       - /etc/hostname:/host/etc/hostname:ro
+      # Model cache persistence — see prod compose for the full rationale.
+      # Without this both agent restarts and downstream-container bind mounts
+      # to the same host path break for prepare_model_assets output.
+      - /var/lib/hypercube-agent/model-cache:/var/lib/hypercube-agent/model-cache
     group_add:
       - "${DOCKER_GID:-999}"
 
