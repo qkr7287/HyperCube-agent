@@ -3,10 +3,14 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
-    # nvidia-container-toolkit needs these two env vars even when the daemon
-    # has `default-runtime: nvidia` — runtime=nvidia alone does NOT inject GPU
-    # devices (toolkit secure-default). On non-GPU hosts they're harmless: if
-    # the nvidia runtime isn't active they're ignored. Mirrors docker-compose.dev.yml.
+    # GPU hosts must set AGENT_RUNTIME=nvidia in .env so the nvidia-container-
+    # toolkit kicks in and injects host's nvidia-smi + driver libs. Non-GPU
+    # hosts leave it unset and stay on runc. Hosts whose daemon has
+    # `default-runtime: nvidia` (e.g. 63) work either way. Mirrors dev compose.
+    runtime: ${AGENT_RUNTIME:-runc}
+    # Even when the nvidia runtime is active, the toolkit refuses to expose
+    # GPU devices unless these env vars are set (secure-default). Harmless on
+    # non-GPU hosts — ignored if the runtime is runc.
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: utility
