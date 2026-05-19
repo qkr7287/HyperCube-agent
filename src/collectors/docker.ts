@@ -278,19 +278,21 @@ export class DockerCollector {
       network: { rx: rxTotal, tx: txTotal },
       disk: { read: diskRead, write: diskWrite },
       network_stats: networkStats,
-      ...(workspace ? { workspace } : {}),
+      workspace,
     };
   }
 
   // Compose ContainerWorkspaceUsage from two sources:
   //   - du -sb /workspace via docker exec  (preferred, workspace-specific)
   //   - SizeRw from listContainers          (fallback for distroless / when du fails)
-  // Returns null only when neither source produced anything (no size capture
-  // yet AND du failed) — caller leaves the workspace field absent in that case
-  // so the backend can distinguish "not measured" from "measured as zero".
+  // Always returns a workspace object — never null. Per the agent payload
+  // contract, every container (workspace-enabled or not, distroless or not)
+  // carries rwLayerGb/rootFsGb so the backend disk KPI has a fallback. Fields
+  // that genuinely couldn't be measured are null, and `source` records which
+  // measurement (if any) produced `usedGb`.
   private async buildWorkspaceUsage(
     info: ContainerInfo,
-  ): Promise<ContainerWorkspaceUsage | null> {
+  ): Promise<ContainerWorkspaceUsage> {
     const du = await this.workspaceProbe.measure(info.id);
     const sizeRw = info.sizeRw ?? null;
     const sizeRootFs = info.sizeRootFs ?? null;
@@ -306,10 +308,6 @@ export class DockerCollector {
       usedGb = rwLayerGb;
       source = "rw-layer";
     }
-
-    // Skip emitting the field entirely if nothing meaningful — avoids creating
-    // a payload-bloat row of nulls every cycle before the first size capture.
-    if (usedGb === null && rwLayerGb === null && rootFsGb === null) return null;
 
     return {
       usedGb,
