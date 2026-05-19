@@ -80,17 +80,45 @@ These are pushed by the Agent on a timer. They do **not** carry `requestId`.
   "timestamp": "...",
   "data": {
     "containerId": "abc...",
-    "cpu": { "usage": 2.1, "cores": 12 },
+    "name": "...",
+    "image": "...",
+    "state": "running",
+    "cpu": { "usage": 2.1, "cores": 12, "usage_pct": 17.5, "cores_quota": 12 },
     "memory": { "usage": 134217728, "limit": 536870912, "percent": 25.0 },
     "network": { "rx": 2048, "tx": 1024 },
-    "disk": { "read": 0, "write": 0 }
+    "disk": { "read": 0, "write": 0 },
+    "network_stats": [{ "network_name": "...", "rx_bytes": 0, "tx_bytes": 0, ... }],
+    "gpu": { "indices": [0], "usage": 27.5, "memoryUsed": 1572864000, "memoryTotal": 8589934592, "source": "pmon" },
+    "workspace": {
+      "usedGb": 0.93,
+      "rwLayerGb": 1.0,
+      "rootFsGb": 8.13,
+      "path": "/var/lib/hypercube/workspaces/<short-id>",
+      "projectId": null,
+      "source": "du"
+    }
   }
 }
 ```
 
-- **Delta**: sent per-container when CPU usage changes ≥ 2%.
+- **Delta**: sent per-container when any of CPU(≥2%), network counters, GPU usage/mem, or workspace usedGb(≥50MB) changes.
 - **Full snapshot**: every 60s, one message per running container regardless of delta (safety net — idle containers would otherwise expire from Backend Redis cache TTL).
 - On reconnect: immediate full snapshot.
+
+**workspace field**
+
+| field | type | notes |
+|---|---|---|
+| `usedGb` | number \| null | `/workspace` 실측 사용량. `source` 가 `null` 또는 측정 실패 시 `null` |
+| `rwLayerGb` | number \| null | `SizeRw / 2^30` — 컨테이너 RW overlay 합산. distroless / no-`/workspace` 컨테이너 fallback |
+| `rootFsGb` | number \| null | `SizeRootFs / 2^30` — RW + base image. 보조 |
+| `path` | string \| null | `/workspace` 가 bind mount 인 경우 host source 경로. overlay 만 있으면 `null` |
+| `projectId` | number \| null | XFS prjquota id (가동 시). 현재 항상 `null` (Phase 3 미가동) |
+| `source` | `"du"` \| `"rw-layer"` \| `"xfs-quota"` \| `null` | `usedGb` 산출 출처. UI 우선순위: `xfs-quota` > `du` > `rw-layer`. `null` 은 "—" 표시 |
+
+측정 주기:
+- `du -sk /workspace` 는 컨테이너별 10s TTL 캐시. distroless 등 실패 시 5분 TTL 로 retry 절약.
+- `SizeRw`/`SizeRootFs` 는 5 사이클(~10s) 마다 `listContainers({size:true})` 한 번 — daemon overlay walk 비용 분산. 사이클 사이엔 캐시 값 재사용.
 
 ### `container_events` (push on Docker event, batched within 100ms)
 
