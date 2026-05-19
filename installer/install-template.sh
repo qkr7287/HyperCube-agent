@@ -96,7 +96,7 @@ collect_config() {
 
   if [[ -z "$HC_BACKEND_URL" ]]; then
     while :; do
-      prompt HC_BACKEND_URL "Backend WebSocket URL" "ws://192.168.0.16:8000"
+      prompt HC_BACKEND_URL "Backend WebSocket URL" "ws://192.168.0.63:37003"
       is_valid_url "$HC_BACKEND_URL" && break
       warn "URL must start with ws:// wss:// http:// https://"
     done

@@ -177,14 +177,14 @@ sudo /root/hypercube-agent-installer-1.0.0-ubuntu24.sh
 [OK] Pre-flight passed.
 [*] Configuration
 
-  Backend WebSocket URL [ws://192.168.0.16:8000]: ▌
+  Backend WebSocket URL [ws://192.168.0.63:37003]: ▌
 ```
 
 여기서 입력해야 할 것 (Enter만 치면 `[ ]` 안의 기본값 사용):
 
 | 묻는 것 | 무엇을 입력? |
 |---|---|
-| `Backend WebSocket URL` | HyperCube Backend 주소. 예: `ws://10.0.1.20:8000` |
+| `Backend WebSocket URL` | HyperCube Backend 주소. 예: `ws://10.0.1.20:37003` (HyperCube **prod** nginx 기본 포트 `:37003`. dev backend 는 `:38000`) |
 | `Backend REST API URL` | 위 ws://를 http://로만 바꾼 값. Enter로 자동값 사용 가능 |
 | `Agent hostname` | Enter (서버 호스트명 자동 사용). 또는 임의 이름 |
 | `Enable per-container GPU monitoring? (y/n)` | GPU 서버면 `y`, 아니면 `n` |
@@ -384,8 +384,8 @@ sudo ./hypercube-agent-installer-1.0.0-ubuntu24.sh
 다음 항목을 차례로 묻습니다:
 
 ```
-Backend WebSocket URL [ws://192.168.0.16:8000]: ws://10.0.1.20:8000
-Backend REST API URL  [http://10.0.1.20:8000]:
+Backend WebSocket URL [ws://192.168.0.63:37003]: ws://10.0.1.20:37003
+Backend REST API URL  [http://10.0.1.20:37003]:
 Agent hostname        [srv-prod-01]:
 Enable per-container GPU monitoring? (y/n) [y]:
 Auto-start on boot via systemd? (y/n) [y]:
@@ -416,8 +416,8 @@ Docker가 없으면 자동으로:
 환경변수로 모든 응답을 미리 지정할 수 있습니다.
 
 ```bash
-sudo HC_BACKEND_URL=ws://10.0.1.20:8000 \
-     HC_BACKEND_API_URL=http://10.0.1.20:8000 \
+sudo HC_BACKEND_URL=ws://10.0.1.20:37003 \
+     HC_BACKEND_API_URL=http://10.0.1.20:37003 \
      HC_AGENT_HOSTNAME=srv-prod-01 \
      HC_GPU_ENABLED=y \
      HC_AUTO_START=y \
@@ -934,8 +934,8 @@ sudo docker load -i /tmp/hc-manual/agent-image.tar
 # 4. /opt/hypercube-agent 직접 작성 (인스톨러가 만들었던 것과 동일)
 sudo mkdir -p /opt/hypercube-agent
 sudo tee /opt/hypercube-agent/.env > /dev/null <<EOF
-BACKEND_URL=ws://10.0.1.20:8000
-BACKEND_API_URL=http://10.0.1.20:8000
+BACKEND_URL=ws://10.0.1.20:37003
+BACKEND_API_URL=http://10.0.1.20:37003
 AGENT_HOSTNAME=$(hostname)
 COLLECT_INTERVAL=2000
 DOCKER_SOCKET=/var/run/docker.sock
@@ -1087,7 +1087,7 @@ sudo /mnt/usb/hypercube-agent-installer-1.0.0-slim.sh
 | 증상 | 원인 | 해결 |
 |---|---|---|
 | Agent 컨테이너 즉시 Exit | SELinux Enforcing | § A-3 |
-| Backend 닿지 않음 | firewalld 막음 | `sudo firewall-cmd --add-port=8000/tcp --permanent && sudo firewall-cmd --reload` (실 포트로) |
+| Backend 닿지 않음 | firewalld 막음 | `sudo firewall-cmd --add-port=38000/tcp --permanent && sudo firewall-cmd --reload` (실 포트로) |
 | `docker compose` 명령 없음 | docker-compose-plugin 누락 | `dnf install` 시 docker-compose-plugin도 같이 |
 | `docker.service` 시작 실패 | iptables-legacy vs nftables | `sudo update-alternatives --config iptables`로 nftables 선택 후 재시작 |
 

@@ -96,8 +96,8 @@ log "Running installer (non-interactive mode via env vars)..."
 # /root/installer.sh into a Windows-host path before docker exec sees it.
 set +e
 MSYS_NO_PATHCONV=1 docker exec \
-  -e HC_BACKEND_URL="ws://10.99.0.1:8000" \
-  -e HC_BACKEND_API_URL="http://10.99.0.1:8000" \
+  -e HC_BACKEND_URL="ws://10.99.0.1:37003" \
+  -e HC_BACKEND_API_URL="http://10.99.0.1:37003" \
   -e HC_AGENT_HOSTNAME="airgap-test-host" \
   -e HC_GPU_ENABLED="n" \
   -e HC_AUTO_START="n" \

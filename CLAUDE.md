@@ -48,11 +48,17 @@ src/
 
 | 호스트 | 용도 | SSH alias | prod 경로 (deploy.yml) | dev 경로 (dev-on.sh) | DOCKER_GID |
 |--------|------|-----------|------------------------|----------------------|------------|
-| 16번 (Mac mini) | prod + self-hosted runner + dev | `hc-dev-16` | `/home/agics-ai/docker/hypercube-agent` (root) | `/home/agics-ai/ts/agent-dev` | 999 |
+| 16번 (Mac mini) | (구) prod + self-hosted runner + dev — **2026-05 prod backend 종료, host 자체도 unreachable** | `hc16` | `/home/agics-ai/docker/hypercube-agent` (root) | `/home/agics-ai/ts/agent-dev` | 999 |
 | 41번 | prod | — | `/home/stdt/docker/hypercube-agent` (root) | (미설정) | — |
-| 63번 | prod + dev | `hc-dev-63` | `/docker/hypercube-agent` (agics) | `/home/agics/ts/agent-dev` | 138 |
+| 63번 | **prod backend + dev backend + agent(prod/dev) 통합** | `hc-dev-63` | `/docker/hypercube-agent` (agics) | `/home/agics/ts/agent-dev` | 138 |
 
-모두 SSH port `2022`. Backend dev: `http://192.168.0.63:8000` / prod: `http://192.168.0.16:8000`.
+모두 SSH port `2022`.
+
+**Backend 엔드포인트 (2026-05~)**:
+- **prod**: `http://192.168.0.63:37003` / `ws://192.168.0.63:37003` (nginx → backend:8000 reverse proxy, project `hypercube-prod`, 컨테이너 prefix `hcprod-*`)
+- **dev**: `http://192.168.0.63:38000` / `ws://192.168.0.63:38000` (project `hypercube`, 컨테이너 prefix `hc-*`)
+- 기본 host port 매핑: postgres `35432`, redis `36379`, backend `38000`, frontend `33000`, prod nginx `37003` (HyperCube 측 `5432/6379/8000/3000/7003`에 `3` prefix).
+- (구) prod `192.168.0.16:3334` 는 종료. PR-merge → deploy.yml 흐름 재검토 필요 (16번 unreachable 이면 self-hosted runner / 16/41 deploy 도 영향).
 
 ## 주요 명령
 
