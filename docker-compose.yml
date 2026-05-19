@@ -3,6 +3,13 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    # nvidia-container-toolkit needs these two env vars even when the daemon
+    # has `default-runtime: nvidia` — runtime=nvidia alone does NOT inject GPU
+    # devices (toolkit secure-default). On non-GPU hosts they're harmless: if
+    # the nvidia runtime isn't active they're ignored. Mirrors docker-compose.dev.yml.
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: utility
     # Host network: agent acts as a host-level monitor, and same-host backend
     # registrations record the real LAN IP rather than a docker bridge IP.
     network_mode: host
