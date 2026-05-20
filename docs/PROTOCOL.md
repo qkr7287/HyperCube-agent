@@ -13,7 +13,7 @@ Agent   → Backend → Browser: {"type": "command_progress", "requestId": "<uui
 - `requestId` is echoed verbatim by the Agent.
 - On failure, `data` is omitted and `error` holds a human-readable string.
 - Commands that require Docker return `error: "Docker is not available on this agent."` when the socket is unreachable.
-- `command_progress` is emitted **only during** long-running commands (`create_container`, `compose_up`). It is never a substitute for the final `command_response` — every command, success or fail, ends with exactly one `command_response`.
+- `command_progress` is emitted **only during** long-running commands (`create_container`, `compose_up`, `prepare_model_assets`). It is never a substitute for the final `command_response` — every command, success or fail, ends with exactly one `command_response`.
 
 ### `command_progress` schema
 
@@ -21,10 +21,11 @@ Agent   → Backend → Browser: {"type": "command_progress", "requestId": "<uui
 |-------------|---------------|-------------------------------------------------------------------------------------------|
 | type        | string        | `"command_progress"`                                                                      |
 | requestId   | string        | matches the originating command                                                           |
-| step        | enum          | `pulling_image` \| `creating` \| `starting` \| `running_check`                            |
+| step        | enum          | `pulling_image` \| `creating` \| `starting` \| `running_check` \| `preparing_model_assets` \| `verifying_model_assets` |
 | percent     | number\|null  | 0-100. `null` when unknown                                                                |
 | message     | string        | human-readable status line                                                                |
-| context     | object (opt.) | e.g. `{ "image": "postgres:15", "containerName": "my-pg", "projectName": "my-stack" }`    |
+| context     | object (opt.) | free-form UI hints, e.g. `{ "image": "postgres:15", "containerName": "my-pg" }`           |
+| data        | object (opt.) | structured payload the backend persists. `prepare_model_assets` sends `{ "bytesDone": N, "percent": N }` |
 
 ## Streaming Messages (Agent → Backend, unsolicited)
 

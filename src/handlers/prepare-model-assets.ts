@@ -117,6 +117,11 @@ async function prepareOneBackendStreamAsset(
     return buildPreparedAssetResult(asset, existing.sizeBytes, true);
   }
 
+  // A non-verified leftover at targetPath (a partial download, or an empty
+  // v1/ directory from a crashed attempt) must not block the retry. Clear it
+  // so the re-download starts from a clean state. (incident c)
+  await fs.rm(asset.targetPath, { recursive: true, force: true }).catch(() => undefined);
+
   const url = resolveBackendStreamUrl(config.backendApiUrl, asset.contentUrl);
   const tempPath = buildTempPath(config.modelCacheRoot, `${asset.versionId ?? "asset"}-${asset.index}`);
 
@@ -126,6 +131,7 @@ async function prepareOneBackendStreamAsset(
     percent: 0,
     message: "Preparing model asset download",
     context: buildProgressContext(asset),
+    data: { bytesDone: 0, percent: 0 },
   });
 
   let moved = false;
@@ -154,6 +160,7 @@ async function prepareOneBackendStreamAsset(
       percent: 100,
       message: "Model asset checksum verified",
       context: { ...buildProgressContext(asset), bytes: downloaded.sizeBytes },
+      data: { bytesDone: downloaded.sizeBytes, percent: 100 },
     });
 
     const manifest = await writeManifest(asset.targetPath, {
@@ -213,16 +220,29 @@ async function preparePreseeded(
   };
 }
 
+// Decides whether targetPath already holds a verified copy of this asset, so
+// a repeated prepare call (e.g. the backend self-heal re-dispatch) can return
+// success immediately without re-downloading. Returns null — "treat as
+// missing, re-prepare" — for every non-verified state rather than throwing,
+// which keeps prepare_model_assets idempotent. (Issue 1)
 async function getExistingVerifiedTarget(
   targetPath: string,
   checksum: ModelAssetChecksum,
-): Promise<{ checksum?: ModelAssetChecksum; sizeBytes?: number } | null> {
+): Promise<{ sizeBytes?: number } | null> {
   if (!(await pathExists(targetPath))) return null;
-  const manifest = await readManifest(targetPath);
-  if (manifest.checksum?.algorithm === checksum.algorithm && manifest.checksum.value === checksum.value) {
-    return manifest;
+  let manifest;
+  try {
+    manifest = await readManifest(targetPath);
+  } catch {
+    // No sha256-verifiable manifest: a partial/aborted download or an empty
+    // directory left by a failed attempt. Not "already prepared". (incident c)
+    return null;
   }
-  throw new Error(`target cache path already exists without matching verification manifest: ${targetPath}`);
+  if (manifest.checksum?.algorithm === checksum.algorithm && manifest.checksum.value === checksum.value) {
+    return { sizeBytes: manifest.sizeBytes };
+  }
+  // Manifest is present but records a different asset → re-prepare.
+  return null;
 }
 
 async function downloadBackendStream(
@@ -258,12 +278,14 @@ async function downloadBackendStream(
       await file.write(chunk);
       hash.update(chunk);
       sizeBytes += chunk.length;
+      const percent = hasTotal ? Math.min(99, Math.round((sizeBytes / total) * 100)) : null;
       emitProgress({
         phase: "prepare_model_assets",
         step: "preparing_model_assets",
-        percent: hasTotal ? Math.min(99, Math.round((sizeBytes / total) * 100)) : null,
+        percent,
         message: "Downloading model asset from backend",
         context: { mode: "backend_stream", bytes: sizeBytes, totalBytes: hasTotal ? total : null },
+        data: { bytesDone: sizeBytes, percent },
       });
     }
   } finally {
