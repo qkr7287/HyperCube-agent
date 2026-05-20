@@ -1,6 +1,7 @@
 import { loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { collectSystemMetrics } from "./collectors/system.js";
+import { buildCapacityReport } from "./collectors/capacity.js";
 import { DockerCollector } from "./collectors/docker.js";
 import { collectGpuPerContainer } from "./collectors/gpu-per-container.js";
 import { DockerEventSubscriber } from "./collectors/docker-events.js";
@@ -10,11 +11,13 @@ import { LogStreamRegistry } from "./streaming/log-stream-registry.js";
 import { ExecRegistry } from "./streaming/exec-registry.js";
 import { registerAgent } from "./transport/register.js";
 import { AgentWebSocket } from "./transport/websocket.js";
+import type { CommandResponse } from "./types/index.js";
 
 const log = createLogger("agent");
 const collectLog = createLogger("collector");
 const abortController = new AbortController();
 let collectTimer: ReturnType<typeof setInterval> | null = null;
+let capacityTimer: ReturnType<typeof setInterval> | null = null;
 let logRegistryRef: LogStreamRegistry | null = null;
 let execRegistryRef: ExecRegistry | null = null;
 let wsRef: AgentWebSocket | null = null;
@@ -31,6 +34,10 @@ const CONTAINER_METRICS_FULL_SNAPSHOT_INTERVAL_MS = 60_000;
 const MAX_COLLECT_CYCLE_MS = 60_000;
 
 const HEAP_LOG_INTERVAL_MS = 60_000;
+
+// Host capacity is near-static; an hourly refresh keeps the backend's
+// workspace-quota handshake state current without spamming the socket.
+const CAPACITY_REPORT_INTERVAL_MS = 60 * 60 * 1000;
 
 function startHeapWatch(): void {
   setInterval(() => {
@@ -96,10 +103,31 @@ async function main(): Promise<void> {
     deltaEngine.reset();
     lastContainersFullSnapshotAt = 0;
     lastContainerMetricsFullSnapshotAt = 0;
+    void sendCapacityReport(config, registration.id, ws).catch((err) => {
+      log.warn(`capacity_report on reconnect skipped: ${(err as Error).message}`);
+    });
     startEventSubscriber();
   };
 
   ws.onCommand = (request) => {
+    // request_capacity is handled here rather than dispatchCommand: the
+    // capacity report is an index-level concern (it shares the ws-send path
+    // and the hourly timer) and the backend gates quota provisioning on it.
+    if (request.command === "request_capacity") {
+      return sendCapacityReport(config, registration.id, ws)
+        .then((): CommandResponse => ({
+          type: "command_response",
+          requestId: request.requestId,
+          success: true,
+          data: { sent: true },
+        }))
+        .catch((err): CommandResponse => ({
+          type: "command_response",
+          requestId: request.requestId,
+          success: false,
+          error: (err as Error).message,
+        }));
+    }
     return dispatchCommand(
       dockerCollector.getDocker(),
       request,
@@ -127,6 +155,17 @@ async function main(): Promise<void> {
 
   // initial connection with retry
   await connectWithRetry(ws);
+
+  // send initial host capacity report (best-effort — backend gates
+  // workspace-quota provisioning on capacity_report.data.disk.workspaceQuota).
+  await sendCapacityReport(config, registration.id, ws).catch((err) => {
+    log.warn(`Initial capacity_report skipped: ${(err as Error).message}`);
+  });
+  capacityTimer = setInterval(() => {
+    void sendCapacityReport(config, registration.id, ws).catch((err) => {
+      log.warn(`capacity_report failed: ${(err as Error).message}`);
+    });
+  }, CAPACITY_REPORT_INTERVAL_MS);
 
   // begin streaming Docker container lifecycle events (no-op when Docker
   // unavailable; collectContainers loop will retry the daemon, after which
@@ -279,6 +318,15 @@ async function collectAndSend(
   }
 }
 
+async function sendCapacityReport(
+  config: ReturnType<typeof loadConfig>,
+  agentId: string,
+  ws: AgentWebSocket,
+): Promise<void> {
+  const report = await buildCapacityReport(config, agentId);
+  ws.send(report);
+}
+
 async function connectWithRetry(ws: AgentWebSocket): Promise<void> {
   while (true) {
     try {
@@ -301,6 +349,7 @@ function shutdown(signal: string): void {
   log.info(`Received ${signal}. Shutting down...`);
   abortController.abort();
   if (collectTimer) clearInterval(collectTimer);
+  if (capacityTimer) clearInterval(capacityTimer);
   if (logRegistryRef) {
     logRegistryRef.closeAll("agent_shutdown");
   }
