@@ -88,7 +88,7 @@ export async function dispatchCommand(
         data = await handlePrepareModelAssets(config, agentToken, requestId, params, emitProgress);
         break;
       case "delete_container":
-        data = await handleDeleteContainer(docker!, params);
+        data = await handleDeleteContainer(docker!, params, config);
         break;
       case "compose_up":
         data = await handleComposeUp(docker!, params, emitProgress);

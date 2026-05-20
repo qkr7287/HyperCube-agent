@@ -1,6 +1,6 @@
 import os from "node:os";
 import { readFileSync } from "node:fs";
-import type { AppConfig } from "./types/index.js";
+import type { AppConfig, WorkspaceQuotaConfig } from "./types/index.js";
 
 export function loadConfig(): AppConfig {
   const backendUrl = requireEnv("BACKEND_URL");
@@ -46,6 +46,14 @@ export function loadConfig(): AppConfig {
       (process.env.GPU_PER_CONTAINER_ENABLED ?? "true").toLowerCase() !== "false",
     modelCacheRoot:
       process.env.MODEL_CACHE_ROOT?.trim() || "/var/lib/hypercube-agent/model-cache",
+    workspaceQuota: loadWorkspaceQuotaConfig(),
+  };
+}
+
+function loadWorkspaceQuotaConfig(): WorkspaceQuotaConfig {
+  return {
+    enabled: (process.env.WORKSPACE_QUOTA_ENABLED ?? "false").toLowerCase() === "true",
+    mountRoot: process.env.WORKSPACE_QUOTA_MOUNT?.trim() || "/var/lib/hypercube/workspaces",
   };
 }
 

@@ -16,6 +16,31 @@ export interface AppConfig {
   dcgmExporterUrl: string | null;
   gpuPerContainerEnabled: boolean;
   modelCacheRoot: string;
+  workspaceQuota: WorkspaceQuotaConfig;
+}
+
+// --- Workspace Quota ---
+
+export interface WorkspaceQuotaConfig {
+  enabled: boolean;
+  mountRoot: string;
+}
+
+export interface WorkspaceQuotaInfo {
+  available: boolean;
+  mountPath: string | null;
+  totalGb: number | null;
+  freeGb: number | null;
+  hardEnforced: boolean;
+}
+
+export interface WorkspaceUsage {
+  path: string;
+  projectId: number;
+  hardGb: number;
+  usedGb: number;
+  availableGb: number;
+  usedPct: number;
 }
 
 // --- System Metrics ---

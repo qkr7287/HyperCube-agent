@@ -24,6 +24,7 @@ const config: AppConfig = {
   dcgmExporterUrl: null,
   gpuPerContainerEnabled: true,
   modelCacheRoot: "/tmp/hypercube-model-cache",
+  workspaceQuota: { enabled: false, mountRoot: "/var/lib/hypercube/workspaces" },
 };
 
 const emitProgress: ProgressEmitter = () => undefined;

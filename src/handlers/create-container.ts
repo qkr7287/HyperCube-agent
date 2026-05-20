@@ -1,5 +1,12 @@
 import type Dockerode from "dockerode";
+import { randomBytes } from "node:crypto";
 import { createLogger } from "../logger.js";
+import {
+  WorkspaceQuotaManager,
+  labelsForPreparedWorkspace,
+  normalizeWorkspaceQuotaRequest,
+  type PreparedWorkspace,
+} from "../workspace-quota.js";
 import {
   INTERNAL_NETWORK_NAME,
   type NetworkPolicy,
@@ -48,6 +55,8 @@ interface WorkspaceParams {
   token?: string;
   port?: number;
   baseUrl?: string;
+  hardGb?: number;
+  mountTarget?: string;
 }
 
 interface ModelMountRequest {
@@ -60,6 +69,7 @@ interface BuildCreateExtras {
   env?: Record<string, string>;
   ports?: PortBinding[];
   volumes?: VolumeBinding[];
+  labels?: Record<string, string>;
   deviceRequests?: Dockerode.DeviceRequest[];
   network?: NetworkCreateExtras;
 }
@@ -76,11 +86,20 @@ interface WorkspaceCreateInfo {
   baseUrl: string;
 }
 
+interface CreateContainerDeps {
+  workspaceManager?: WorkspaceQuotaManager;
+  // Override for self-tests so the generated workspace shortId is
+  // deterministic. Production callers omit this and get a fresh
+  // random 12 hex per workspace.
+  workspaceShortId?: () => string;
+}
+
 export async function handleCreateContainer(
   docker: Dockerode,
   params: Record<string, unknown>,
   emitProgress: ProgressEmitter,
   config: AppConfig,
+  deps: CreateContainerDeps = {},
 ): Promise<Record<string, unknown>> {
   const p = params as unknown as CreateParams;
   if (!p.image) throw new Error("image is required");
@@ -108,9 +127,30 @@ export async function handleCreateContainer(
   }
 
   const gpuDeviceRequests = await buildGpuDeviceRequests(p.gpus);
-  const workspace = buildWorkspaceCreateInfo(p, networkPolicy !== "host");
+  const appWorkspace = buildWorkspaceCreateInfo(p, networkPolicy !== "host");
+  const quotaWorkspaceRequest = normalizeWorkspaceQuotaRequest(p.workspace);
   const modelMounts = await buildModelMounts(config.modelCacheRoot, p.modelMounts);
   const network = await buildNetworkCreateExtras(docker, networkPolicy);
+
+  let workspaceManager: WorkspaceQuotaManager | null = null;
+  let preparedWorkspace: PreparedWorkspace | null = null;
+
+  if (quotaWorkspaceRequest) {
+    workspaceManager = deps.workspaceManager ?? new WorkspaceQuotaManager(config.workspaceQuota);
+    const shortId = (deps.workspaceShortId ?? newWorkspaceShortId)();
+    emitProgress({
+      step: "creating",
+      phase: "workspace_quota",
+      percent: null,
+      message: `Provisioning ${quotaWorkspaceRequest.hardGb}G workspace for ${p.name}`,
+      context: { containerName: p.name, hardGb: quotaWorkspaceRequest.hardGb },
+    });
+    preparedWorkspace = await workspaceManager.prepare({
+      shortId,
+      hardGb: quotaWorkspaceRequest.hardGb,
+      mountTarget: quotaWorkspaceRequest.mountTarget,
+    });
+  }
 
   // 3. create
   emitProgress({
@@ -122,15 +162,30 @@ export async function handleCreateContainer(
 
   const createOpts = buildCreateOptions(p, {
     deviceRequests: gpuDeviceRequests,
-    env: workspace?.env,
-    ports: workspace?.ports,
-    volumes: modelMounts,
+    env: appWorkspace?.env,
+    ports: appWorkspace?.ports,
+    volumes: [
+      ...modelMounts,
+      ...(preparedWorkspace
+        ? [
+            {
+              host: preparedWorkspace.path,
+              container: preparedWorkspace.mountTarget,
+              mode: "rw" as const,
+            },
+          ]
+        : []),
+    ],
+    labels: preparedWorkspace ? labelsForPreparedWorkspace(preparedWorkspace) : undefined,
     network,
   });
   let container;
   try {
     container = await docker.createContainer(createOpts);
   } catch (err) {
+    if (preparedWorkspace && workspaceManager) {
+      await cleanupPreparedWorkspace(workspaceManager, preparedWorkspace, "docker create failed");
+    }
     throw new Error(`create failed: ${(err as Error).message}`);
   }
 
@@ -145,6 +200,12 @@ export async function handleCreateContainer(
   try {
     await container.start();
   } catch (err) {
+    await container.remove({ force: true }).catch((removeErr) => {
+      log.warn(`failed to remove ${p.name} after start failed: ${(removeErr as Error).message}`);
+    });
+    if (preparedWorkspace && workspaceManager) {
+      await cleanupPreparedWorkspace(workspaceManager, preparedWorkspace, "docker start failed");
+    }
     throw new Error(`start failed: ${(err as Error).message}`);
   }
 
@@ -157,16 +218,60 @@ export async function handleCreateContainer(
         `failed to remove ${p.name} after network policy assertion failed: ${(removeErr as Error).message}`,
       );
     });
+    if (preparedWorkspace && workspaceManager) {
+      await cleanupPreparedWorkspace(
+        workspaceManager,
+        preparedWorkspace,
+        "network policy assertion failed",
+      );
+    }
     throw err;
   }
 
+  const workspaceResponse = buildWorkspaceResponse(appWorkspace?.response, preparedWorkspace);
   return {
     containerId: info.Id,
     name: info.Name.replace(/^\//, ""),
     image: p.image,
     state: info.State.Status,
-    ...(workspace ? { workspace: workspace.response } : {}),
+    ...(workspaceResponse ? { workspace: workspaceResponse } : {}),
   };
+}
+
+function newWorkspaceShortId(): string {
+  return randomBytes(6).toString("hex");
+}
+
+function buildWorkspaceResponse(
+  appWorkspace: WorkspaceCreateInfo | undefined,
+  preparedWorkspace: PreparedWorkspace | null,
+): Record<string, unknown> | null {
+  if (!appWorkspace && !preparedWorkspace) return null;
+  return {
+    ...(appWorkspace ?? {}),
+    ...(preparedWorkspace
+      ? {
+          path: preparedWorkspace.path,
+          projectId: preparedWorkspace.projectId,
+          hardGb: preparedWorkspace.hardGb,
+          mountTarget: preparedWorkspace.mountTarget,
+        }
+      : {}),
+  };
+}
+
+async function cleanupPreparedWorkspace(
+  workspaceManager: WorkspaceQuotaManager,
+  workspace: PreparedWorkspace,
+  reason: string,
+): Promise<void> {
+  try {
+    await workspaceManager.teardown({ shortId: workspace.shortId });
+  } catch (err) {
+    log.warn(
+      `workspace cleanup failed after ${reason} for ${workspace.path}: ${(err as Error).message}`,
+    );
+  }
 }
 
 function hasMlWorkspaceOptions(p: CreateParams, networkPolicy: NetworkPolicy): boolean {
@@ -328,6 +433,10 @@ function buildWorkspaceCreateInfo(
 ): { env: Record<string, string>; ports: PortBinding[]; response: WorkspaceCreateInfo } | null {
   if (!p.workspace) return null;
   const rawPort = p.workspace.port;
+  // A quota-only workspace payload ({ hardGb, mountTarget }) carries no port.
+  // The ML/Jupyter workspace path below is conditional on port being present;
+  // returning null here lets the independent quota path run on its own.
+  if (rawPort === undefined || rawPort === null) return null;
   if (typeof rawPort !== "number" || !Number.isInteger(rawPort) || rawPort < 1 || rawPort > 65535) {
     throw new Error("workspace.port is required and must be a TCP port number");
   }
@@ -531,6 +640,7 @@ function buildCreateOptions(
     Env: envArr,
     ExposedPorts: exposedPorts,
     HostConfig: hostConfig,
+    ...(extras.labels ? { Labels: extras.labels } : {}),
   };
 
   if (extras.network?.endpointsConfig) {
