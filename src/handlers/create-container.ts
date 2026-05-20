@@ -43,6 +43,19 @@ interface CreateParams {
   modelMounts?: ModelMountRequest[];
   workspace?: WorkspaceParams;
   networkPolicy?: unknown;
+  hostConfig?: ContainerResourceLimits;
+}
+
+// CPU / memory limits the backend computes from the container template
+// (deployment.py:_host_config_payload). All fields optional — a 0 or
+// missing value means "unbounded", matching Docker's own semantics, so we
+// only emit a HostConfig key when a real limit is present.
+interface ContainerResourceLimits {
+  memory?: number;
+  memorySwap?: number;
+  cpuQuota?: number;
+  cpuPeriod?: number;
+  oomKillDisable?: boolean;
 }
 
 interface GpuRequest {
@@ -591,6 +604,32 @@ function calcOverallPercent(
   return Math.min(99, Math.round((current / total) * 100));
 }
 
+// Maps the backend's resource-limit payload onto Docker HostConfig keys.
+// A 0 / missing numeric value means "unbounded" — Docker treats 0 as no
+// limit, so we omit the key entirely rather than sending 0 (keeps inspect
+// output clean and matches the no-limit default). oomKillDisable is emitted
+// whenever it is an explicit boolean.
+function buildResourceLimits(limits: ContainerResourceLimits | undefined): Partial<Dockerode.HostConfig> {
+  if (!limits) return {};
+  const out: Partial<Dockerode.HostConfig> = {};
+  if (typeof limits.memory === "number" && limits.memory > 0) {
+    out.Memory = limits.memory;
+  }
+  if (typeof limits.memorySwap === "number" && limits.memorySwap > 0) {
+    out.MemorySwap = limits.memorySwap;
+  }
+  if (typeof limits.cpuQuota === "number" && limits.cpuQuota > 0) {
+    out.CpuQuota = limits.cpuQuota;
+  }
+  if (typeof limits.cpuPeriod === "number" && limits.cpuPeriod > 0) {
+    out.CpuPeriod = limits.cpuPeriod;
+  }
+  if (typeof limits.oomKillDisable === "boolean") {
+    out.OomKillDisable = limits.oomKillDisable;
+  }
+  return out;
+}
+
 function buildCreateOptions(
   p: CreateParams,
   extras: BuildCreateExtras = {},
@@ -632,6 +671,7 @@ function buildCreateOptions(
     ...(Object.keys(portBindings).length > 0 ? { PortBindings: portBindings } : {}),
     ...(extras.deviceRequests ? { DeviceRequests: extras.deviceRequests } : {}),
     ...(extras.network ? { NetworkMode: extras.network.networkMode } : {}),
+    ...buildResourceLimits(p.hostConfig),
   };
 
   const createOptions: Dockerode.ContainerCreateOptions = {
