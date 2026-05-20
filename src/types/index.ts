@@ -308,6 +308,7 @@ export interface ContainerEvent {
 
 export type WsMessageType =
   | "system_metrics"
+  | "capacity_report"
   | "containers"
   | "container_metrics"
   | "container_events"
@@ -376,8 +377,55 @@ export interface ExecEndMessage {
   error?: string;
 }
 
+export interface CapacityReportMessage {
+  type: "capacity_report";
+  agentId: string;
+  timestamp: string;
+  data: CapacityReportData;
+}
+
+export interface CapacityReportData {
+  cpu: {
+    cores: number;
+    model: string | null;
+    architecture: string;
+  };
+  memory: {
+    totalMb: number;
+  };
+  disk: {
+    rootTotalGb: number | null;
+    rootUsedGb: number | null;
+    filesystem: string | null;
+    workspaceQuota: WorkspaceQuotaInfo;
+  };
+  network: {
+    primaryInterface: string | null;
+    speedMbps: number | null;
+  };
+  gpu: {
+    count: number;
+    devices: Array<{
+      index: number;
+      model: string;
+      memoryMb: number;
+      migEnabled: boolean;
+    }>;
+  };
+  os: {
+    distro: string | null;
+    kernel: string;
+    cgroupVersion: "v1" | "v2" | "unknown";
+  };
+  agent: {
+    version: string;
+    nodeVersion: string;
+  };
+}
+
 export type WsMessage =
   | WsEnvelopedMessage
+  | CapacityReportMessage
   | LogChunkMessage
   | LogStreamEndMessage
   | ExecChunkMessage
@@ -391,6 +439,7 @@ export type CommandName =
   | "image_inspect"
   | "control"
   | "system_info"
+  | "request_capacity"
   | "create_container"
   | "prepare_model_assets"
   | "delete_container"
