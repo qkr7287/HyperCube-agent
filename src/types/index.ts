@@ -443,6 +443,7 @@ export type CommandName =
   | "create_container"
   | "update_container"
   | "prepare_model_assets"
+  | "query_model_cache"
   | "delete_container"
   | "compose_up"
   | "compose_down"
@@ -470,6 +471,10 @@ export interface CommandProgress {
   percent: number | null;
   message: string;
   context?: Record<string, unknown>;
+  // Structured progress payload the backend persists directly (e.g.
+  // `bytesDone` for ModelPrepareJob). Distinct from `context`, which is a
+  // free-form bag for human-readable UI hints.
+  data?: Record<string, unknown>;
 }
 
 export type ProgressEmitter = (progress: Omit<CommandProgress, "type" | "requestId">) => void;

@@ -16,6 +16,7 @@ import { handleCreateContainer } from "./create-container.js";
 import { handleUpdateContainer } from "./update-container.js";
 import { handleImageInspect } from "./image-inspect.js";
 import { handlePrepareModelAssets } from "./prepare-model-assets.js";
+import { handleQueryModelCache } from "./query-model-cache.js";
 import { handleDeleteContainer } from "./delete-container.js";
 import { handleComposeUp } from "./compose-up.js";
 import { handleComposeDown } from "./compose-down.js";
@@ -91,6 +92,9 @@ export async function dispatchCommand(
         break;
       case "prepare_model_assets":
         data = await handlePrepareModelAssets(config, agentToken, requestId, params, emitProgress);
+        break;
+      case "query_model_cache":
+        data = await handleQueryModelCache(config, params);
         break;
       case "delete_container":
         data = await handleDeleteContainer(docker!, params, config);
