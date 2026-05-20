@@ -444,6 +444,7 @@ export type CommandName =
   | "update_container"
   | "prepare_model_assets"
   | "query_model_cache"
+  | "host_port_scan"
   | "delete_container"
   | "compose_up"
   | "compose_down"

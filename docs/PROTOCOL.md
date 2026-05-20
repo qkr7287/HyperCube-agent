@@ -366,13 +366,13 @@ Create and start a single container. Emits `command_progress` events during imag
 | pull_if_missing| boolean | no       | `true`             | pull image if not present locally          |
 | gpus           | array   | no       | `[]`               | ML workspace GPU/MIG device requests       |
 | modelMounts    | array   | no       | `[]`               | verified model cache mounts                |
-| workspace      | object  | no       |                    | ML form `{kind,token,port,baseUrl}` (Jupyter) OR quota form `{hardGb,mountTarget}` — see below |
+| workspace      | object  | no       |                    | ML form `{kind,token,port,hostPort?,baseUrl}` (Jupyter) OR quota form `{hardGb,mountTarget}` — see below |
 | networkPolicy  | string  | no       | `"none"`           | `none`, `internal_only`, or `host`         |
 | hostConfig     | object  | no       |                    | resource limits `{memory,memorySwap,cpuQuota,cpuPeriod,oomKillDisable}` — see below |
 
 `workspace` accepts two independent shapes (both may be present):
 
-- **ML/Jupyter** `{kind,token,port,baseUrl}` — injects `JUPYTER_*` env, publishes the port. `port` required for this path; absent → path skipped (no longer an error).
+- **ML/Jupyter** `{kind,token,port,hostPort?,baseUrl}` — injects `JUPYTER_*` env, publishes the port. `port` required for this path (the container's internal port, e.g. 8888); absent → path skipped (no longer an error). `hostPort` (optional) publishes that internal port on a specific host port — used to run a second workspace on the same host without colliding on 8888. Absent → the host port mirrors the container port.
 - **Quota** `{hardGb,mountTarget}` — provisions an XFS prjquota-backed data volume of `hardGb` GiB and bind-mounts it rw at `mountTarget` (any absolute path — `/data`, `/var/lib/postgresql/data`, ...; defaults to `/workspace`). Requires `WORKSPACE_QUOTA_ENABLED=true` on the agent; while disabled a quota request fails the create cleanly. Container is labelled `app.hypercube.workspace.*` for teardown on `delete_container`.
 
 `hostConfig` resource limits (a `0`/missing value = unbounded → key omitted):
@@ -742,3 +742,22 @@ Same unit rules as `create_container`'s `hostConfig`. The backend only sends lim
 ```
 
 **errors** — `"containerId is required"`, `"container not found"`, `"memory_mb must be a positive integer (MB)"`, `"cpu_percent must be a positive integer (100 = 1 core)"`, `"restart_policy must be one of: no, on-failure, unless-stopped, always"`, `"no updatable fields provided (memory_mb / cpu_percent / restart_policy)"`.
+
+### 13. `host_port_scan`
+
+Reports the host's TCP `LISTEN` ports so the backend can render accurate
+used-ports (`coverage=full`) instead of only the ports HyperCube itself
+published. The agent reads `/proc/net/tcp{,6}` directly (no `ss`/`netstat`
+dependency); running with `network_mode: host` these reflect the host's
+network namespace.
+
+**params** — none.
+
+**success.data**
+
+```json
+{ "ports": [{ "port": 22, "proto": "tcp" }, { "port": 8888, "proto": "tcp" }] }
+```
+
+`ports` is sorted ascending and de-duplicated across IPv4/IPv6. Only
+`LISTEN`-state TCP sockets are included (`proto` is always `"tcp"`).
