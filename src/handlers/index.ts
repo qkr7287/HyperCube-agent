@@ -13,6 +13,7 @@ import { handleInspect } from "./inspect.js";
 import { handleControl } from "./control.js";
 import { handleSystemInfo } from "./system-info.js";
 import { handleCreateContainer } from "./create-container.js";
+import { handleUpdateContainer } from "./update-container.js";
 import { handleImageInspect } from "./image-inspect.js";
 import { handlePrepareModelAssets } from "./prepare-model-assets.js";
 import { handleDeleteContainer } from "./delete-container.js";
@@ -28,6 +29,7 @@ const DOCKER_COMMANDS = new Set([
   "image_inspect",
   "control",
   "create_container",
+  "update_container",
   "delete_container",
   "compose_up",
   "compose_down",
@@ -83,6 +85,9 @@ export async function dispatchCommand(
         break;
       case "create_container":
         data = await handleCreateContainer(docker!, params, emitProgress, config);
+        break;
+      case "update_container":
+        data = await handleUpdateContainer(docker!, params);
         break;
       case "prepare_model_assets":
         data = await handlePrepareModelAssets(config, agentToken, requestId, params, emitProgress);

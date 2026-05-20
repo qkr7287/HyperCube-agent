@@ -441,6 +441,7 @@ export type CommandName =
   | "system_info"
   | "request_capacity"
   | "create_container"
+  | "update_container"
   | "prepare_model_assets"
   | "delete_container"
   | "compose_up"
