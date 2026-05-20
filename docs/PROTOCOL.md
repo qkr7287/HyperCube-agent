@@ -217,6 +217,35 @@ Emitted exactly once when an active stream ends naturally — i.e. the container
 | `stream_error`      | Docker socket read error. `error` field carries the message      |
 | `agent_shutdown`    | Agent process is shutting down gracefully                        |
 
+### `capacity_report` (push — on connect, on reconnect, hourly, on `request_capacity`)
+
+Near-static host capacity. Sent once after WebSocket connect, again on every reconnect, on a 1h timer, and on demand when the agent receives a `request_capacity` command. The backend gates workspace-quota provisioning on `data.disk.workspaceQuota`.
+
+```json
+{
+  "type": "capacity_report",
+  "agentId": "<uuid>",
+  "timestamp": "2026-05-20T...",
+  "data": {
+    "cpu": { "cores": 12, "model": "...", "architecture": "x64" },
+    "memory": { "totalMb": 64256 },
+    "disk": {
+      "rootTotalGb": 457, "rootUsedGb": 357, "filesystem": "/dev/...",
+      "workspaceQuota": {
+        "available": false, "mountPath": null,
+        "totalGb": null, "freeGb": null, "hardEnforced": false
+      }
+    },
+    "network": { "primaryInterface": "eth0", "speedMbps": 1000 },
+    "gpu": { "count": 1, "devices": [{ "index": 0, "model": "...", "memoryMb": 8192, "migEnabled": false }] },
+    "os": { "distro": "Debian GNU/Linux 12", "kernel": "...", "cgroupVersion": "v2" },
+    "agent": { "version": "1.0.0", "nodeVersion": "v20..." }
+  }
+}
+```
+
+`disk.workspaceQuota` — `available:true` only when `WORKSPACE_QUOTA_ENABLED=true` and `WORKSPACE_QUOTA_MOUNT` is a working filesystem; `hardEnforced:true` only when that mount actually carries the `prjquota` option. Until then all fields are null/false and the backend leaves quota provisioning off.
+
 ---
 
 ## Commands
@@ -336,8 +365,24 @@ Create and start a single container. Emits `command_progress` events during imag
 | pull_if_missing| boolean | no       | `true`             | pull image if not present locally          |
 | gpus           | array   | no       | `[]`               | ML workspace GPU/MIG device requests       |
 | modelMounts    | array   | no       | `[]`               | verified model cache mounts                |
-| workspace      | object  | no       |                    | Jupyter env/base URL/port metadata         |
+| workspace      | object  | no       |                    | ML form `{kind,token,port,baseUrl}` (Jupyter) OR quota form `{hardGb,mountTarget}` — see below |
 | networkPolicy  | string  | no       | `"none"`           | `none`, `internal_only`, or `host`         |
+| hostConfig     | object  | no       |                    | resource limits `{memory,memorySwap,cpuQuota,cpuPeriod,oomKillDisable}` — see below |
+
+`workspace` accepts two independent shapes (both may be present):
+
+- **ML/Jupyter** `{kind,token,port,baseUrl}` — injects `JUPYTER_*` env, publishes the port. `port` required for this path; absent → path skipped (no longer an error).
+- **Quota** `{hardGb,mountTarget}` — provisions an XFS prjquota-backed data volume of `hardGb` GiB and bind-mounts it rw at `mountTarget` (any absolute path — `/data`, `/var/lib/postgresql/data`, ...; defaults to `/workspace`). Requires `WORKSPACE_QUOTA_ENABLED=true` on the agent; while disabled a quota request fails the create cleanly. Container is labelled `app.hypercube.workspace.*` for teardown on `delete_container`.
+
+`hostConfig` resource limits (a `0`/missing value = unbounded → key omitted):
+
+| field          | maps to                       | unit                          |
+|----------------|-------------------------------|-------------------------------|
+| memory         | `HostConfig.Memory`           | bytes                         |
+| memorySwap     | `HostConfig.MemorySwap`       | bytes                         |
+| cpuQuota       | `HostConfig.CpuQuota`         | µs per period (100 = 1% core when period 100000) |
+| cpuPeriod      | `HostConfig.CpuPeriod`        | µs (typically 100000)         |
+| oomKillDisable | `HostConfig.OomKillDisable`   | boolean                       |
 
 `networkPolicy` behavior:
 
@@ -670,3 +715,29 @@ Top-N processes inside a container, sorted by CPU or memory. Works on minimal im
 - PID enumeration: tries `container.top()` first (image-agnostic — daemon runs host `ps` against the container's pid namespace; `ps` is never invoked inside the container). Falls back to scanning `/host/proc/<pid>/cgroup` for the container ID when `top()` fails (paused containers, daemon errors).
 - CPU sampling holds the dispatcher for ~100ms by design. Concurrent calls are safe but each pays this cost.
 - Sort tie-breaker: ascending PID (stable order across calls).
+
+---
+
+### 12. `update_container`
+
+Live resource update of a running container via `dockerode container.update()` — no recreation, no restart. Partial: only the fields the backend sends are touched; omitted fields keep their current value.
+
+**params**
+
+| field             | type    | required | notes                                                          |
+|-------------------|---------|----------|----------------------------------------------------------------|
+| containerId       | string  | yes      | full or short ID                                               |
+| memory_mb         | number  | no       | MB. `Memory` + `MemorySwap` = `memory_mb × 1024 × 1024`         |
+| cpu_percent       | number  | no       | `100` = 1 core. `CpuQuota` = `cpu_percent × 1000`, `CpuPeriod` = 100000 |
+| restart_policy    | string  | no       | `no` \| `on-failure` \| `unless-stopped` \| `always`           |
+| restart_max_retry | number  | no       | `RestartPolicy.MaximumRetryCount` — only applied when `restart_policy` is `on-failure` |
+
+Same unit rules as `create_container`'s `hostConfig`. The backend only sends limits ≥ 1 (no 0/unlimited).
+
+**success.data**
+
+```json
+{ "containerId": "abc123def456...", "updated": true, "applied": ["cpu=250%", "memory=3072MB"] }
+```
+
+**errors** — `"containerId is required"`, `"container not found"`, `"memory_mb must be a positive integer (MB)"`, `"cpu_percent must be a positive integer (100 = 1 core)"`, `"restart_policy must be one of: no, on-failure, unless-stopped, always"`, `"no updatable fields provided (memory_mb / cpu_percent / restart_policy)"`.
