@@ -33,16 +33,17 @@
 
 ```
 src/
-├── collectors/   docker.ts, docker-events.ts, system.ts, gpu-per-container.ts
-├── handlers/     control, inspect, logs, system-info, create/delete-container, compose-up/down, prepare-model-assets, container-processes, image-inspect
+├── collectors/   docker.ts, docker-events.ts, system.ts, gpu-per-container.ts, capacity.ts (capacity_report)
+├── handlers/     control, inspect, logs, system-info, create/update/delete-container, compose-up/down, prepare-model-assets, container-processes, image-inspect
 ├── streaming/    log-stream-registry.ts (live log follow, frame demux, idle TTL)
 ├── sync/         delta.ts (변경분 + 60s 주기 full snapshot, workspace 포함)
 ├── transport/    register.ts (REST), websocket.ts (재접속 + 큐잉)
-├── utils/        gpu-{dcgm,mig,pmon,cgroup,topology}, container-cpu-quota, cpu-topology, utmp, workspace-usage (du -sk + TTL cache), model-cache
+├── utils/        gpu-{dcgm,mig,pmon,cgroup,topology}, container-cpu-quota, cpu-topology, utmp, workspace-usage (du -sk + TTL cache), model-cache, command-runner
+├── workspace-quota.ts   XFS prjquota provisioning (WorkspaceQuotaManager) — dormant until WORKSPACE_QUOTA_ENABLED
 └── types/
 ```
 
-데이터 흐름: 등록(REST `/api/agents/`) → 승인 후 JWT 발급 → WS 연결 → 첫 full snapshot → 2초 주기 delta + 컨테이너 이벤트 push + 명령 응답/진행상황. payload contract v3.
+데이터 흐름: 등록(REST `/api/agents/`) → 승인 후 JWT 발급 → WS 연결 → 첫 full snapshot + capacity_report → 2초 주기 delta + 컨테이너 이벤트 push + 명령 응답/진행상황 + 1h 주기 capacity_report. payload contract v3.
 
 ## 환경 정보
 
@@ -86,6 +87,10 @@ src/
 | `AGENT_ADVERTISE_IP` / `HOST_IP` | (없음) | 등록 payload IP override |
 | `GPU_PER_CONTAINER_ENABLED` | true | GPU 귀속 측정 |
 | `DCGM_EXPORTER_URL` | (없음) | DCGM-exporter 스크레이프 URL |
+| `AGENT_RUNTIME` | (없음→runc) | GPU 호스트는 `nvidia` 필수 (compose `runtime`). [[debug_compose_runtime_override]] |
+| `WORKSPACE_QUOTA_ENABLED` | false | XFS prjquota 볼륨 provisioning 활성. 호스트 인프라(loop file + prjquota mount) 선행 필요 |
+| `WORKSPACE_QUOTA_MOUNT` | `/var/lib/hypercube/workspaces` | prjquota XFS 마운트 루트. agent 컨테이너에도 bind mount 돼야 함 |
+| `MODEL_CACHE_ROOT` | `/var/lib/hypercube-agent/model-cache` | 모델 자산 캐시. host bind mount 필수 |
 
 ## 과거 이슈 (반복 방지)
 
