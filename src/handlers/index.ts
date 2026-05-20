@@ -21,6 +21,7 @@ import { handleDeleteContainer } from "./delete-container.js";
 import { handleComposeUp } from "./compose-up.js";
 import { handleComposeDown } from "./compose-down.js";
 import { handleContainerProcesses } from "./container-processes.js";
+import { handleHostPortScan } from "./host-port-scan.js";
 
 const log = createLogger("dispatcher");
 
@@ -95,6 +96,9 @@ export async function dispatchCommand(
         break;
       case "query_model_cache":
         data = await handleQueryModelCache(config, params);
+        break;
+      case "host_port_scan":
+        data = await handleHostPortScan(config);
         break;
       case "delete_container":
         data = await handleDeleteContainer(docker!, params, config);

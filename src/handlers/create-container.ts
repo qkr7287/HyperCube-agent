@@ -67,6 +67,11 @@ interface WorkspaceParams {
   kind?: string;
   token?: string;
   port?: number;
+  // Explicit host port to publish the workspace on. Lets the backend place
+  // a second workspace on the same host without colliding on the default
+  // 8888 ("Bind for 0.0.0.0:8888 failed: port is already allocated").
+  // Absent → host port mirrors the container port.
+  hostPort?: number;
   baseUrl?: string;
   hardGb?: number;
   mountTarget?: string;
@@ -455,17 +460,24 @@ function buildWorkspaceCreateInfo(
   }
   const port = rawPort;
 
+  const requestedHostPort = parseWorkspaceHostPort(p.workspace.hostPort);
   const existingPort = (p.ports ?? []).find(
     (candidate) => candidate.container === port && (candidate.protocol ?? "tcp") === "tcp",
   );
-  const hostPort = existingPort?.host ?? port;
+  // Precedence: explicit workspace.hostPort > a matching entry in p.ports >
+  // mirror the container port.
+  const hostPort = requestedHostPort ?? existingPort?.host ?? port;
   const baseUrl = normalizeWorkspaceBaseUrl(p.workspace.baseUrl);
   const token = typeof p.workspace.token === "string" ? p.workspace.token : "";
   const kind = typeof p.workspace.kind === "string" ? p.workspace.kind : null;
+  // Publish from the workspace path when a host port is explicitly requested,
+  // or when p.ports does not already cover this container port. When neither
+  // applies (p.ports owns the binding) the workspace adds nothing — preserves
+  // the prior behavior.
   const ports =
-    existingPort || !publishPort
-      ? []
-      : [{ host: hostPort, container: port, protocol: "tcp" as const }];
+    publishPort && (requestedHostPort !== null || !existingPort)
+      ? [{ host: hostPort, container: port, protocol: "tcp" as const }]
+      : [];
 
   return {
     env: {
@@ -482,6 +494,14 @@ function buildWorkspaceCreateInfo(
       baseUrl,
     },
   };
+}
+
+function parseWorkspaceHostPort(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 65535) {
+    throw new Error("workspace.hostPort must be a TCP port number (1-65535)");
+  }
+  return value;
 }
 
 function normalizeWorkspaceBaseUrl(value: string | undefined): string {
