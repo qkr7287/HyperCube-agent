@@ -761,3 +761,87 @@ network namespace.
 
 `ports` is sorted ascending and de-duplicated across IPv4/IPv6. Only
 `LISTEN`-state TCP sockets are included (`proto` is always `"tcp"`).
+
+### 14. `prepare_model_assets`
+
+Download and verify ML model assets into the host model cache
+(`MODEL_CACHE_ROOT`, default `/var/lib/hypercube-agent/model-cache`).
+Emits `command_progress` during download.
+
+**Idempotent.** Re-issuing the command for an asset that is already
+present and verified returns immediately with `cached: true` and no
+re-download — so the backend self-heal may safely re-dispatch a stuck
+job. A verified asset is one whose on-disk verification manifest matches
+the requested `sha256`; a leftover empty directory or a partial download
+from a failed attempt has no valid manifest and is treated as missing
+(cleaned up and re-downloaded), never as "already prepared".
+
+**params**
+
+| field        | type   | required | notes                                                                |
+|--------------|--------|----------|----------------------------------------------------------------------|
+| transferMode | string | yes      | `backend_stream` or `preseeded` (`nas_copy` is not implemented)      |
+
+`backend_stream` — one asset at the top level, or a batch under `assets[]`. Each asset:
+
+| field      | type   | required | notes                                                                  |
+|------------|--------|----------|------------------------------------------------------------------------|
+| sha256     | string | yes      | 64-char hex; the expected checksum (also accepted as `checksum`)        |
+| source     | object | yes      | `{ type:"backend_stream", contentUrl, auth:"agent_bearer" }`            |
+| versionId  | string | no       | echoed back in the result                                               |
+| assetSlug  | string | no       | with `version`, derives the default cache path `<slug>/<version>`       |
+| version    | string | no       |                                                                          |
+| sizeBytes  | number | no       | when present, a size mismatch fails the download                        |
+| cachePath  | string | no       | explicit cache path (must resolve under `MODEL_CACHE_ROOT`)             |
+
+`source.contentUrl` must resolve to the `BACKEND_API_URL` origin; credentials go in headers (`Authorization: Bearer <agentToken>`), never the query string. External schemes (`s3:`, `git:`, `hf:`, ...) are rejected.
+
+`preseeded` — verify an asset already staged on the host: `{ sourcePath, checksum? }`.
+
+**success.data**
+
+```json
+{
+  "mode": "backend_stream",
+  "cachePath": "/var/lib/hypercube-agent/model-cache/<slug>/<version>",
+  "sha256": "<hex>",
+  "sizeBytes": 4200000000,
+  "verified": true,
+  "cached": false,
+  "assets": [ { "versionId": "...", "cachePath": "...", "sha256": "...", "cached": false } ]
+}
+```
+
+`cached` is `true` when every asset was already verified (no re-download).
+
+**progress steps**: `preparing_model_assets` → `verifying_model_assets`. Each `command_progress` carries `data: { bytesDone, percent }` (`bytesDone` = cumulative bytes written, integer, camelCase).
+
+### 15. `query_model_cache`
+
+Report the on-disk state of a model-cache path without downloading. Used
+by the backend to settle a `ModelPrepareJob` whose `command_response` was
+lost over the WebSocket (the files may have landed even though the reply
+did not).
+
+**params**
+
+| field             | type   | required | notes                                            |
+|-------------------|--------|----------|---------------------------------------------------|
+| expectedCachePath | string | yes      | path to inspect (must resolve under `MODEL_CACHE_ROOT`) |
+| sha256            | string | no       | 64-char hex; expected checksum                    |
+| sizeBytes         | number | no       | expected total size in bytes                      |
+| versionId         | string | no       | passed through for the backend's own correlation  |
+
+`requestId` is echoed verbatim — the backend sends `ModelPrepareJob.id`.
+
+**success.data**
+
+```json
+{ "status": "ready", "cachePath": "/var/lib/.../<slug>/<version>", "sha256": "<hex>", "sizeBytes": 4200000000 }
+```
+
+The agent re-hashes `expectedCachePath` and reports `status`:
+
+- `ready` — exists and both `sha256` and `sizeBytes` match (a check is skipped when the corresponding param is omitted).
+- `partial` — exists but the hash or size does not match (truncated / corrupt).
+- `missing` — the path does not exist (`sha256` is `null`).

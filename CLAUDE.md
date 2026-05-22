@@ -9,7 +9,7 @@
 ## 핵심 룰 (반복 실수 방지)
 
 - **HyperCube ↔ Agent 작업 요청은 GitHub Issues로 트래킹** (이 repo의 Issues가 single source of truth). HyperCube 측 commit message에 `qkr7287/hypercube-agent#NN` 또는 `Closes qkr7287/hypercube-agent#NN`로 연결. mailbox 파일 방식은 2026-05-08 폐기.
-- **로컬에서 dev 실행 금지** (`npm run dev` 금지). dev는 63번에서 동작 (16 폐기). `scripts/dev-on.sh <63>` → Mutagen 세션(`agent-63`) → 원격에서 `docker-compose.dev.yml` 빌드/기동. 정리는 `dev-off.sh`. (`docs/dev-remote.md`)
+- **로컬에서 dev 실행 금지** (`npm run dev` 금지). dev는 41·63에서 동작 (16 폐기). `scripts/dev-on.sh <41|63>` → Mutagen 세션(`agent-41`/`agent-63`) → 원격에서 `docker-compose.dev.yml` 빌드/기동. 정리는 `dev-off.sh`. 41 dev는 GPU 호스트라 `.env.dev`에 `AGENT_RUNTIME=nvidia` 필수. (`docs/dev-remote.md`)
 - **dev 작업 중엔 commit / PR / main push 금지**. main push만이 deploy를 트리거하므로, 사용자가 명시 요청한 경우에만 실행. (`memory: feedback_dev_workflow`)
 - **배포 흐름**: `main` push → GitHub Actions `verify`(tsc + build, Node 20) → self-hosted runner(`lan-runner`, **63번 `hc63-agent-runner`**)에서 **41 → 63 순차** 배포 (`max-parallel: 1, fail-fast`). 각 호스트에서 `git reset --hard origin/main && docker compose -p hypercube-agent-prod up -d --build` 후 `Sent N messages|Collecting every` 로그로 헬스체크. (16번은 2026-05 matrix 에서 제거됨)
 - Agent 컨테이너는 **`network_mode: host` + `privileged` + `pid: host`**, `docker.sock` ro, `/proc:/host/proc:ro`, `/var/run/utmp:ro`, `/etc/hostname:/host/etc/hostname:ro`, **`/var/lib/hypercube-agent/model-cache` rw** 마운트. 등록 시 `ip_address` 미전송 → backend가 TCP peer로 추론. NAT/VPN에서만 `AGENT_ADVERTISE_IP` override.
@@ -68,8 +68,8 @@ src/
 |------|------|
 | `npm run typecheck` | `tsc --noEmit` (CI `verify`와 동일) |
 | `npm run build` | `dist/` 생성 |
-| `scripts/dev-on.sh <16\|63>` | 원격 dev 컨테이너 기동 (Mutagen sync 포함) |
-| `scripts/dev-off.sh <16\|63>` | 원격 dev 컨테이너·세션 정리 |
+| `scripts/dev-on.sh <41\|63>` | 원격 dev 컨테이너 기동 (Mutagen sync 포함) |
+| `scripts/dev-off.sh <41\|63>` | 원격 dev 컨테이너·세션 정리 |
 | `scripts/build-installer.sh` | air-gap installer 산출 |
 
 ## 환경변수 (주요)

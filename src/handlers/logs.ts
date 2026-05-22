@@ -3,6 +3,12 @@ import { createLogger } from "../logger.js";
 
 const log = createLogger("handler:logs");
 
+// get_logs must answer well inside the backend's 15s command timeout even
+// when dockerode's logs call hangs — daemon never closing the response,
+// a stream stuck mid-frame, etc. Cap the docker call below that bound so the
+// dispatcher can still turn a stall into an error envelope in time.
+const LOGS_TIMEOUT_MS = 12_000;
+
 interface GetLogsParams {
   containerId: string;
   tail?: number;
@@ -24,18 +30,86 @@ export async function handleGetLogs(
   log.info(`Fetching logs for ${containerId} (tail: ${tail})`);
 
   const container = docker.getContainer(containerId);
-  const buffer = await container.logs({
-    stdout: true,
-    stderr: true,
-    tail,
-    since: since ?? undefined,
-    timestamps,
-    follow: false,
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), LOGS_TIMEOUT_MS);
+
+  try {
+    // follow:false → dockerode resolves the whole log dump as a Buffer.
+    // abortSignal cancels the underlying HTTP request if the daemon stalls,
+    // so a hang reaches us as a rejection instead of a leaked pending socket.
+    const result = await container.logs({
+      stdout: true,
+      stderr: true,
+      tail,
+      since: since ?? undefined,
+      timestamps,
+      follow: false,
+      abortSignal: ac.signal,
+    } as Parameters<typeof container.logs>[0]);
+
+    // Defensive: a non-follow call should yield a Buffer, but guard against
+    // dockerode/daemon combinations that hand back a stream instead — those
+    // are exactly the case that used to hang silently.
+    const buffer = Buffer.isBuffer(result)
+      ? result
+      : await collectStream(
+          result as unknown as NodeJS.ReadableStream,
+          ac.signal,
+        );
+
+    const lines = stripDockerHeaders(buffer);
+    return { containerId, lines };
+  } catch (err) {
+    if (ac.signal.aborted) {
+      throw new Error(
+        `get_logs timed out after ${LOGS_TIMEOUT_MS}ms for ${containerId}`,
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Drain a readable stream into one Buffer, bailing out the moment the shared
+ * abort signal fires so a stalled stream can't hang the handler.
+ */
+function collectStream(
+  stream: NodeJS.ReadableStream,
+  signal: AbortSignal,
+): Promise<Buffer> {
+  return new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+
+    const cleanup = () => {
+      signal.removeEventListener("abort", onAbort);
+      stream.removeAllListeners("data");
+      stream.removeAllListeners("end");
+      stream.removeAllListeners("error");
+    };
+    const onAbort = () => {
+      cleanup();
+      (stream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+      reject(new Error("aborted"));
+    };
+
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort);
+
+    stream.on("data", (chunk: Buffer) => chunks.push(chunk));
+    stream.on("end", () => {
+      cleanup();
+      resolve(Buffer.concat(chunks));
+    });
+    stream.on("error", (err: Error) => {
+      cleanup();
+      reject(err);
+    });
   });
-
-  const lines = stripDockerHeaders(buffer);
-
-  return { containerId, lines };
 }
 
 /**

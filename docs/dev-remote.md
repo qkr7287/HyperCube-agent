@@ -6,18 +6,22 @@
 
 | 서버 | SSH alias | User | Host path | Agent hostname |
 |---|---|---|---|---|
-| 16 | `hc-dev-16` | root | `/home/agics-ai/ts/agent-dev` | `server_16_dev` |
+| 41 | `hc41` | root | `/home/stdt/docker/hypercube-agent-dev` | `server_41_dev` |
 | 63 | `hc-dev-63` | agics | `/home/agics/ts/agent-dev` | `server_63_dev` |
 
-41번은 prod agent 유지 목적으로 dev 인스턴스를 띄우지 않습니다.
+16번 dev는 2026-05 폐기 (host unreachable). 41·63 모두 prod·dev 인스턴스를
+한 호스트에서 컨테이너 격리해 함께 운영한다. 41·63 모두 GPU 호스트이므로
+`.env.dev`에 `AGENT_RUNTIME=nvidia`가 있어야 한다 — 누락 시 compose가
+`runtime: runc`로 떠 nvidia-smi가 주입되지 않고 GPU가 PCI fallback으로
+잡힌다.
 
 ## 사전 준비 (로컬 PC 1회)
 
 1. Mutagen 0.18+ (scoop: `scoop install mutagen`)
 2. `~/.ssh/config`에 alias 추가
    ```
-   Host hc-dev-16
-     HostName 192.168.0.16
+   Host hc41
+     HostName 192.168.0.41
      User root
      Port 2022
      IdentityFile ~/.ssh/dcmtool_sync
@@ -28,18 +32,18 @@
      Port 2022
      IdentityFile ~/.ssh/dcmtool_sync
    ```
-3. 공개키가 각 서버의 `authorized_keys`에 등록되어 있을 것. `ssh hc-dev-16 hostname` / `ssh hc-dev-63 hostname`으로 확인.
+3. 공개키가 각 서버의 `authorized_keys`에 등록되어 있을 것. `ssh hc41 hostname` / `ssh hc-dev-63 hostname`으로 확인.
 
 ## 기동
 
 ```bash
 ./scripts/dev-on.sh 63   # 63번 dev 기동
-./scripts/dev-on.sh 16   # 16번 dev 기동 (필요 시)
+./scripts/dev-on.sh 41   # 41번 dev 기동
 ```
 
 스크립트가 하는 일:
 1. 원격에 작업 디렉터리 생성
-2. Mutagen sync 세션 생성/재개 (`agent-16`, `agent-63`)
+2. Mutagen sync 세션 생성/재개 (`agent-41`, `agent-63`)
 3. 초기 동기화 완료 대기
 4. 원격에 `.env.dev`가 없으면 `.env.dev.example`에서 복사 + suffix 치환
 5. `docker compose -p hypercube-agent-dev -f docker-compose.dev.yml up -d --build`

@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 # Spin up a remote dev agent instance with Mutagen-synced source.
-# Usage: ./scripts/dev-on.sh <16|63>
+# Usage: ./scripts/dev-on.sh <16|41|63>
 
 set -euo pipefail
 
-TARGET="${1:?target required: 16|63}"
+TARGET="${1:?target required: 16|41|63}"
 
 case "$TARGET" in
   16)
     SSH_ALIAS=hc-dev-16
     REMOTE_DIR=/home/agics-ai/ts/agent-dev
     SUFFIX=16
+    DOCKER_GID=999
+    ;;
+  41)
+    SSH_ALIAS=hc41
+    REMOTE_DIR=/home/stdt/docker/hypercube-agent-dev
+    SUFFIX=41
     DOCKER_GID=999
     ;;
   63)
@@ -20,7 +26,7 @@ case "$TARGET" in
     DOCKER_GID=138
     ;;
   *)
-    echo "unknown target: $TARGET (expected 16 or 63)" >&2
+    echo "unknown target: $TARGET (expected 16, 41, or 63)" >&2
     exit 1
     ;;
 esac
