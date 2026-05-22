@@ -32,10 +32,15 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          # server-16 (192.168.0.16) was decommissioned 2026-05. Old prod
-          # backend on :3334 is gone and the host is unreachable. Re-add when
-          # the host comes back or stays out — see project_workspace_quota_slice
-          # memory for legacy state.
+          # server-16 (192.168.0.16) was decommissioned 2026-05 then recovered
+          # 2026-05-22. Host is reachable again; agent reinstalled and points
+          # at the 63 prod backend (:37003). GPU driver is dead so it runs on
+          # runc — no AGENT_RUNTIME in its .env.
+          - name: server-16
+            host: 192.168.0.16
+            user: root
+            port: 2022
+            path: /home/agics-ai/docker/hypercube-agent
           - name: server-41
             host: 192.168.0.41
             user: root
